@@ -181,3 +181,38 @@ def chat_text(messages: List[Dict[str, str]], *, temperature: float = 0.2, model
         raise LLMError(f"DeepSeek error {r.status_code}: {snippet}")
 
     raise LLMError(f"DeepSeek request failed after retries: {last_err}")
+
+
+def chat_text_cached(messages: List[Dict[str, str]], *, temperature: float = 0.2, model: Optional[str] = None,
+                     timeout: int = 60, max_tries: int = 4, cache: bool = True) -> str:
+    """Cached variant of :func:`chat_text` with optional per-call caching.
+
+    The cache uses a hash of the request payload as the filename. Set
+    ``cache=False`` to bypass disk writes for sensitive interactions.
+    Exceptions during cache I/O are suppressed to favor successful LLM calls.
+    """
+    payload = {
+        "model": model or DEEPSEEK_MODEL,
+        "messages": messages,
+        "temperature": temperature,
+    }
+    if not (LLM_CACHE_ENABLED and cache):
+        return chat_text(messages, temperature=temperature, model=model, timeout=timeout, max_tries=max_tries)
+    key = _hash_payload("chat_text", payload)
+    LLM_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    fpath = LLM_CACHE_DIR / f"{key}.txt"
+    if fpath.exists():
+        try:
+            with fpath.open("r", encoding="utf-8") as fh:
+                return fh.read()
+        except Exception:
+            pass
+    text = chat_text(messages, temperature=temperature, model=model, timeout=timeout, max_tries=max_tries)
+    try:
+        tmp_path = fpath.with_suffix(".tmp")
+        with tmp_path.open("w", encoding="utf-8") as fh:
+            fh.write(text)
+        tmp_path.replace(fpath)
+    except Exception:
+        pass
+    return text
