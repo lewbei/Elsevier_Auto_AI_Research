@@ -1,0 +1,39 @@
+# Project settings that override env/defaults across agents.
+# You can rename or point CONFIG_FILE to a different path.
+
+project:
+  # Only prompt override: the goal (domain-agnostic)
+  goal: "your goal"
+  # Optional explicit title (used in paper/report); leave empty to auto-generate
+  title: ""
+
+dataset:
+  # Generalized dataset configuration (YAML-first). If absent, env may be used as fallback.
+  # kind: imagefolder | cifar10 | custom (optional; inferred when omitted)
+  kind: imagefolder
+  # Free-form label; does not gate behavior
+  name: isic
+  # Base path; for imagefolder expects split subfolders
+  path: data/isic
+  # Optional split folder names
+  splits:
+    train: train
+    val: val
+    test: test
+  # Allow safe fallbacks (e.g., torchvision FakeData) if real dataset not present.
+  allow_fallback: false
+  # Allow dataset download where supported (e.g., CIFAR10)
+  allow_download: false
+  # For CIFAR10 only: fraction of train data used as validation
+  val_fraction: 0.1
+  # Optional custom dataset classes when kind=custom
+  # custom:
+  #   train: { module: mypkg.datasets, class: MyTrain, kwargs: { root: /data, split: train } }
+  #   val:   { module: mypkg.datasets, class: MyVal,   kwargs: { root: /data, split: val } }
+  #   test:  { module: mypkg.datasets, class: MyTest,  kwargs: { root: /data, split: test } }
+
+research:
+  num_problems: 2
+  num_objectives: 2
+  num_contributions: 2
+  num_questions: 1

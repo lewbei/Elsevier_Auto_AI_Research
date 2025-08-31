@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 
 from pdf_utils import extract_text_from_pdf
 from llm_utils import chat_json, LLMError
+from lab.config import get
 
 
 load_dotenv()
@@ -25,6 +26,26 @@ def _truncate(s: str, n: int) -> str:
     if len(s) <= n:
         return s
     return s[: n - 3] + "..."
+
+
+def _load_citations(csv_path: pathlib.Path) -> List[Dict[str, str]]:
+    """Load citations from an optional CSV (abstract_screen_deepseek.csv)."""
+    cites: List[Dict[str, str]] = []
+    if not csv_path.exists():
+        return cites
+    try:
+        import csv
+        with open(csv_path, "r", encoding="utf-8", newline="") as f:
+            r = csv.DictReader(f)
+            for row in r:
+                cites.append({
+                    "title": str(row.get("title") or ""),
+                    "year": str(row.get("year") or ""),
+                    "doi": str(row.get("doi") or ""),
+                })
+    except Exception:
+        return []
+    return cites
 
 
 def summarize_paper(text: str, title_hint: str = "") -> Dict[str, Any]:
@@ -110,10 +131,12 @@ def group_novelty_and_ideas(summaries: List[Dict[str, Any]]) -> Dict[str, Any]:
             "methods": s.get("methods") or [],
             "limitations": s.get("limitations") or [],
         })
+    goal = str(get("project.goal", "your goal") or "your goal")
     system = (
         "You are a panel moderator coordinating multiple experts. Given a list of papers with their novelty claims, "
         "cluster the claims into 3-6 themes, summarize each theme, name representative papers, and then propose 5-8 "
-        "new research ideas that combine or extend these themes. Return JSON."
+        "new research ideas that combine or extend these themes. Return JSON. "
+        + f"Focus the synthesis toward the goal: {goal}."
     )
     user_payload = {
         "papers": items,
@@ -137,6 +160,46 @@ def group_novelty_and_ideas(summaries: List[Dict[str, Any]]) -> Dict[str, Any]:
     if not isinstance(new_ideas, list):
         new_ideas = []
     return {"themes": themes, "new_ideas": new_ideas}
+
+
+def derive_research_outline(themes_and_ideas: Dict[str, Any], citations: List[Dict[str, str]]) -> Dict[str, Any]:
+    """Use LLM to derive problems/objectives/contributions/research_questions with citations."""
+    n_probs = int(get("research.num_problems", 2) or 2)
+    n_objs = int(get("research.num_objectives", 2) or 2)
+    n_cont = int(get("research.num_contributions", 2) or 2)
+    n_rqs = int(get("research.num_questions", 1) or 1)
+    goal = str(get("project.goal", "your goal") or "your goal")
+    system = (
+        "You are a meticulous research planner. Given clustered themes/ideas and a project goal, craft: "
+        f"exactly {n_probs} concise problem statements, {n_objs} objectives, {n_cont} contributions, and {n_rqs} research question(s). "
+        "Where appropriate, include inline citations using (Title, DOI) for papers from the provided citation list. Return JSON."
+    )
+    user_payload = {
+        "goal": goal,
+        "themes": themes_and_ideas.get("themes", []),
+        "new_ideas": themes_and_ideas.get("new_ideas", []),
+        "citations": citations,
+        "output_schema": {
+            "problems": ["string"],
+            "objectives": ["string"],
+            "contributions": ["string"],
+            "research_questions": ["string"],
+        }
+    }
+    js = chat_json(system, json.dumps(user_payload, ensure_ascii=False), temperature=0.0)
+    def _as_list(x):
+        if isinstance(x, list):
+            return [str(i) for i in x]
+        if not x:
+            return []
+        return [str(x)]
+    return {
+        "problems": (_as_list(js.get("problems")) or [])[:n_probs],
+        "objectives": (_as_list(js.get("objectives")) or [])[:n_objs],
+        "contributions": (_as_list(js.get("contributions")) or [])[:n_cont],
+        "research_questions": (_as_list(js.get("research_questions")) or [])[:n_rqs],
+        "citations": citations,
+    }
 
 
 def main() -> None:
@@ -199,10 +262,23 @@ def main() -> None:
         print(f"[ERR] LLM group discussion failed: {exc}")
         panel = {"themes": [], "new_ideas": []}
 
+    # Research outline and citations
+    try:
+        cites = _load_citations(pathlib.Path("abstract_screen_deepseek.csv"))
+        outline = derive_research_outline(panel, cites)
+    except LLMError as exc:
+        print(f"[WARN] LLM research outline failed: {exc}")
+        outline = {"problems": [], "objectives": [], "contributions": [], "research_questions": [], "citations": []}
+
     final = {
         "num_papers": len(summaries),
         "themes": panel.get("themes", []),
         "new_ideas": panel.get("new_ideas", []),
+        "problems": outline.get("problems", []),
+        "objectives": outline.get("objectives", []),
+        "contributions": outline.get("contributions", []),
+        "research_questions": outline.get("research_questions", []),
+        "citations": outline.get("citations", []),
     }
     with open(REPORT_PATH, "w", encoding="utf-8") as f:
         json.dump(final, f, ensure_ascii=False, indent=2)

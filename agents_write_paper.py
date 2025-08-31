@@ -12,6 +12,7 @@ import subprocess
 from typing import Any, Dict, List
 
 from dotenv import load_dotenv
+from lab.config import get
 
 
 load_dotenv()
@@ -34,12 +35,21 @@ def _read_json(path: pathlib.Path) -> Dict[str, Any]:
         return {}
 
 
-def _best_acc(runs: List[Dict[str, Any]], name_contains: str) -> float:
-    """Return the highest validation accuracy for runs matching a name snippet."""
+def _best_acc(runs: List[Dict[str, Any]], name_contains: str, prefer_metric: str = "test_accuracy") -> float:
+    """Return the highest accuracy for runs matching a name snippet.
+    Prefers `prefer_metric` (e.g., test_accuracy) and falls back to val_accuracy.
+    """
     best = 0.0
     for r in runs:
         if name_contains in str(r.get("name")):
-            acc = float(r.get("result", {}).get("metrics", {}).get("val_accuracy", 0.0) or 0.0)
+            metrics = r.get("result", {}).get("metrics", {})
+            acc = metrics.get(prefer_metric)
+            if acc is None:
+                acc = metrics.get("val_accuracy", 0.0)
+            try:
+                acc = float(acc or 0.0)
+            except Exception:
+                acc = 0.0
             if acc > best:
                 best = acc
     return best
@@ -93,7 +103,7 @@ def _render_md(title: str, novelty: Dict[str, Any], plan: Dict[str, Any], summar
     lines.append("We evaluate baseline, novelty, and ablation, plus minor variants.")
     lines.append("")
     lines.append("### Results")
-    lines.append("| Setting | Val Acc |\n|---|---:|")
+    lines.append("| Setting | Acc (test) |\n|---|---:|")
     lines.append(f"| Baseline | {baseline_acc:.4f} |")
     lines.append(f"| Novelty | {novelty_acc:.4f} |")
     lines.append(f"| Ablation | {ablation_acc:.4f} |")
@@ -290,7 +300,9 @@ def main() -> None:
     plan = _read_json(DATA_DIR / "plan.json")
     summary = _read_json(RUNS_DIR / "summary.json")
 
-    title = "A Minimal Novelty for Skin-Cancer Classification"
+    project_title = str(get("project.title", "") or "").strip()
+    project_topic = str(get("project.topic", "Skin-Cancer Classification") or "Skin-Cancer Classification")
+    title = project_title or f"A Minimal Novelty for {project_topic}"
     if novelty.get("new_ideas"):
         idea = str(novelty["new_ideas"][0])[:60]
         if idea:

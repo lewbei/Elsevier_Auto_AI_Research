@@ -1,11 +1,13 @@
 import json
 import pathlib
 from typing import Any, Dict
+import os
 
 from dotenv import load_dotenv
 from llm_utils import chat_json_cached, LLMError
 from lab.logging_utils import append_jsonl
 from lab.prompt_overrides import load_prompt
+from lab.config import dataset_name, dataset_path_for, get
 
 
 DATA_DIR = pathlib.Path("data")
@@ -21,15 +23,16 @@ def build_plan(novelty: Dict[str, Any]) -> Dict[str, Any]:
     """Ask the LLM to turn the novelty report into a compact, actionable plan.
     The plan is intentionally small so it is cheap and deterministic.
     """
+    topic = str(get("project.goal", "your task") or "your task")
     system = (
         "You are a Principal Investigator. Convert the provided novelty report into a compact research plan "
-        "for an iterative experiment loop on skin-cancer classification. Keep it strictly JSON and small."
+        f"for an iterative experiment loop on {topic}. Keep it strictly JSON and small."
     )
     user_payload = {
         "novelty_report": novelty,
         "constraints": {
             "budget": "<= 1 epoch per run, <= 100 steps",
-            "dataset_default": "ISIC under data/isic with train/ and val/",
+            "dataset_default": f"{dataset_name('ISIC').upper()} under {dataset_path_for()} with train/ and val/",
         },
         "output_schema": {
             "objective": "string",
@@ -59,7 +62,7 @@ def build_plan(novelty: Dict[str, Any]) -> Dict[str, Any]:
         "objective": str(js.get("objective") or "Evaluate a simple novelty on ISIC"),
         "hypotheses": _as_list(js.get("hypotheses")),
         "success_criteria": js.get("success_criteria") or [{"metric": "val_accuracy", "delta_vs_baseline": 0.005}],
-        "datasets": js.get("datasets") or [{"name": "ISIC", "path": "data/isic"}],
+        "datasets": js.get("datasets") or [{"name": dataset_name("ISIC").upper(), "path": dataset_path_for()}],
         "baselines": _as_list(js.get("baselines") or ["resnet18 minimal"]),
         "novelty_focus": str(js.get("novelty_focus") or "augmentation and/or classifier head"),
         "stopping_rules": _as_list(js.get("stopping_rules") or ["stop if novelty beats baseline by >=0.5pp"]),
@@ -83,7 +86,7 @@ def make_plan_offline(novelty: Dict[str, Any]) -> Dict[str, Any]:
         "objective": objective,
         "hypotheses": ["A small augmentation or head change improves val acc by ~0.5pp"],
         "success_criteria": [{"metric": "val_accuracy", "delta_vs_baseline": 0.005}],
-        "datasets": [{"name": "ISIC", "path": "data/isic"}],
+        "datasets": [{"name": dataset_name("ISIC").upper(), "path": dataset_path_for()}],
         "baselines": ["resnet18 minimal"],
         "novelty_focus": novelty_focus,
         "stopping_rules": ["stop if novelty beats baseline by >=0.5pp"],

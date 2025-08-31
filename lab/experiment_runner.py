@@ -4,6 +4,8 @@ import pathlib
 from typing import Any, Dict
 import random
 import os
+import importlib
+from lab.config import dataset_name, dataset_path_for, get_bool, dataset_kind, dataset_splits, get
 
 
 def _now() -> str:
@@ -27,11 +29,16 @@ def _seed_everything(seed: int) -> None:
 
 
 def dataset_choice() -> str:
-    """Return selected dataset name based on env var DATASET; defaults to 'isic'."""
-    ds = str(os.getenv("DATASET", "isic") or "isic").strip().lower()
-    if ds in {"isic", "cifar10"}:
-        return ds
-    return "isic"
+    """Return selected dataset name.
+
+    Resolution: explicit env DATASET (if set) > YAML config (dataset.name) > default 'isic'.
+    This preserves env-based tests while enabling project-level YAML control.
+    """
+    env_ds = str(os.getenv("DATASET", "") or "").strip().lower()
+    if env_ds in {"isic", "cifar10"}:
+        return env_ds
+    ds = dataset_name("isic")
+    return ds if ds in {"isic", "cifar10"} else "isic"
 
 
 def _run_real(spec: Dict[str, Any]) -> Dict[str, Any]:
@@ -56,8 +63,9 @@ def _run_real(spec: Dict[str, Any]) -> Dict[str, Any]:
     _seed_everything(seed)
 
     ds_choice = dataset_choice()
-    use_fallback = str(os.getenv("ALLOW_FALLBACK_DATASET", "")).lower() in {"1", "true", "yes"}
-    allow_download = str(os.getenv("ALLOW_DATASET_DOWNLOAD", "")).lower() in {"1", "true", "yes"}
+    # YAML overrides env for flags
+    use_fallback = get_bool("dataset.allow_fallback", False) or (str(os.getenv("ALLOW_FALLBACK_DATASET", "")).lower() in {"1", "true", "yes"})
+    allow_download = get_bool("dataset.allow_download", False) or (str(os.getenv("ALLOW_DATASET_DOWNLOAD", "")).lower() in {"1", "true", "yes"})
 
     input_size = int(spec.get("input_size") or 224)
     batch_size = int(spec.get("batch_size") or 16)
@@ -91,14 +99,34 @@ def _run_real(spec: Dict[str, Any]) -> Dict[str, Any]:
     ])
 
     num_classes = None
-    if ds_choice == "isic":
-        data_dir = pathlib.Path(spec.get("dataset_path") or "data/isic")
+    # Determine dataset kind (config first; fallback by choice)
+    kind = dataset_kind(None)
+    if not kind:
+        kind = "cifar10" if ds_choice == "cifar10" else "imagefolder"
+
+    if kind == "imagefolder":
+        data_dir = pathlib.Path(spec.get("dataset_path") or dataset_path_for())
         train_dir = data_dir / "train"
         val_dir = data_dir / "val"
+        # allow custom split subfolder names via YAML
+        splits = dataset_splits()
+        train_dir = data_dir / splits.get("train", "train")
+        val_dir = data_dir / splits.get("val", "val")
+        test_dir = data_dir / splits.get("test", "test")
         if train_dir.exists() and val_dir.exists():
             ds_train = ImageFolder(str(train_dir), transform=tfm_train)
             ds_val = ImageFolder(str(val_dir), transform=tfm_val)
             num_classes = len(ds_train.classes)
+            if test_dir.exists():
+                ds_test = ImageFolder(str(test_dir), transform=tfm_val)
+            else:
+                # fallback: use val as test or FakeData if allowed
+                if use_fallback:
+                    from torchvision.datasets import FakeData  # type: ignore
+                    ds_test = FakeData(size=int(spec.get("fallback_test_size", 50)), image_size=(3, input_size, input_size),
+                                       num_classes=num_classes, transform=tfm_val)
+                else:
+                    ds_test = ds_val
         elif use_fallback:
             from torchvision.datasets import FakeData  # type: ignore
             num_classes = int(spec.get("num_classes", 2))
@@ -106,30 +134,45 @@ def _run_real(spec: Dict[str, Any]) -> Dict[str, Any]:
                                 num_classes=num_classes, transform=tfm_train)
             ds_val = FakeData(size=int(spec.get("fallback_val_size", 50)), image_size=(3, input_size, input_size),
                               num_classes=num_classes, transform=tfm_val)
+            ds_test = FakeData(size=int(spec.get("fallback_test_size", 50)), image_size=(3, input_size, input_size),
+                               num_classes=num_classes, transform=tfm_val)
         else:
             return {
                 "mode": "stub",
-                "reason": f"Dataset not found under {data_dir} (expect train/ and val/ folders)",
+                "reason": f"ImageFolder dataset not found under {data_dir} (expect {train_dir.name}/ and {val_dir.name}/ folders)",
                 "started": _now(),
                 "finished": _now(),
-                "metrics": {"val_accuracy": 0.0},
+                "metrics": {"val_accuracy": 0.0, "test_accuracy": 0.0},
             }
-    elif ds_choice == "cifar10":
+    elif kind == "cifar10":
         try:
             from torchvision.datasets import CIFAR10, FakeData  # type: ignore
+            from torch.utils.data import random_split, Subset  # type: ignore
         except Exception as exc:
             return {
                 "mode": "stub",
                 "reason": f"torchvision missing for CIFAR10: {exc}",
                 "started": _now(),
                 "finished": _now(),
-                "metrics": {"val_accuracy": 0.0},
+                "metrics": {"val_accuracy": 0.0, "test_accuracy": 0.0},
             }
-        root = pathlib.Path("data/cifar10")
+        root = pathlib.Path(spec.get("dataset_path") or dataset_path_for("cifar10"))
         try:
-            ds_train = CIFAR10(root=str(root), train=True, transform=tfm_train, download=allow_download)
-            ds_val = CIFAR10(root=str(root), train=False, transform=tfm_val, download=allow_download)
+            # Build train/val from training set via split, and use official test as test
+            full_train = CIFAR10(root=str(root), train=True, transform=tfm_train, download=allow_download)
+            full_val = CIFAR10(root=str(root), train=True, transform=tfm_val, download=False)
             num_classes = 10
+            val_frac = float(get("dataset.val_fraction", 0.1) or 0.1)
+            n_total = len(full_train)
+            n_val = max(1, int(n_total * min(max(val_frac, 0.01), 0.5)))
+            n_train = n_total - n_val
+            import torch as _torch  # local alias for generator
+            gen = _torch.Generator().manual_seed(int(spec.get("seed", 42)))
+            train_subset, val_subset_tmp = random_split(full_train, [n_train, n_val], generator=gen)
+            # Build val subset with val transforms using the same indices
+            ds_val = Subset(full_val, val_subset_tmp.indices)  # type: ignore[attr-defined]
+            ds_train = train_subset
+            ds_test = CIFAR10(root=str(root), train=False, transform=tfm_val, download=allow_download)
         except Exception:
             if use_fallback:
                 num_classes = 10
@@ -137,25 +180,89 @@ def _run_real(spec: Dict[str, Any]) -> Dict[str, Any]:
                                     num_classes=num_classes, transform=tfm_train)
                 ds_val = FakeData(size=int(spec.get("fallback_val_size", 50)), image_size=(3, input_size, input_size),
                                   num_classes=num_classes, transform=tfm_val)
+                ds_test = FakeData(size=int(spec.get("fallback_test_size", 50)), image_size=(3, input_size, input_size),
+                                   num_classes=num_classes, transform=tfm_val)
             else:
                 return {
                     "mode": "stub",
                     "reason": "CIFAR10 unavailable and download disabled; set ALLOW_DATASET_DOWNLOAD or ALLOW_FALLBACK_DATASET",
                     "started": _now(),
                     "finished": _now(),
-                    "metrics": {"val_accuracy": 0.0},
+                    "metrics": {"val_accuracy": 0.0, "test_accuracy": 0.0},
                 }
+    elif kind == "custom":
+        # Optional: load custom dataset classes from config
+        # Expect config keys under dataset.custom.{train,val} with module/class/kwargs
+        def _load_custom(which: str, transform):
+            entry = get(f"dataset.custom.{which}", None)
+            if not isinstance(entry, dict):
+                return None
+            module = entry.get("module")
+            cls = entry.get("class")
+            kwargs = entry.get("kwargs") or {}
+            if not module or not cls:
+                return None
+            try:
+                mod = importlib.import_module(str(module))
+                ctor = getattr(mod, str(cls))
+                if transform is not None:
+                    kwargs = dict(kwargs)
+                    if "transform" not in kwargs:
+                        kwargs["transform"] = transform
+                return ctor(**kwargs)
+            except Exception:
+                return None
+
+        ds_train = _load_custom("train", tfm_train)
+        ds_val = _load_custom("val", tfm_val)
+        if ds_train is None or ds_val is None:
+            return {
+                "mode": "stub",
+                "reason": "Custom dataset not fully configured or failed to import. See dataset.custom.* in config.",
+                "started": _now(),
+                "finished": _now(),
+                "metrics": {"val_accuracy": 0.0, "test_accuracy": 0.0},
+            }
+        # optional custom test dataset
+        ds_test = None
+        entry_test = get("dataset.custom.test", None)
+        if isinstance(entry_test, dict):
+            module = entry_test.get("module")
+            cls = entry_test.get("class")
+            kwargs = entry_test.get("kwargs") or {}
+            try:
+                mod = importlib.import_module(str(module))
+                ctor = getattr(mod, str(cls))
+                if "transform" not in kwargs:
+                    kwargs["transform"] = tfm_val
+                ds_test = ctor(**kwargs)
+            except Exception:
+                ds_test = None
+        if ds_test is None:
+            # fallback to val as test when not specified
+            ds_test = ds_val
+        try:
+            # Try to infer num_classes by inspecting first target or attribute
+            num_classes = int(get("dataset.num_classes", 0) or 0)
+        except Exception:
+            num_classes = 0
+        if not num_classes:
+            try:
+                num_classes = len(getattr(ds_train, "classes"))  # type: ignore[arg-type]
+            except Exception:
+                num_classes = int(spec.get("num_classes", 2))
     else:
         return {
             "mode": "stub",
-            "reason": f"Unknown dataset choice: {ds_choice}",
+            "reason": f"Unknown dataset kind: {kind}",
             "started": _now(),
             "finished": _now(),
-            "metrics": {"val_accuracy": 0.0},
+            "metrics": {"val_accuracy": 0.0, "test_accuracy": 0.0},
         }
 
     dl_train = DataLoader(ds_train, batch_size=batch_size, shuffle=True, num_workers=0)
     dl_val = DataLoader(ds_val, batch_size=batch_size, shuffle=False, num_workers=0)
+    dl_test = DataLoader(ds_test, batch_size=batch_size, shuffle=False, num_workers=0)
 
     device = "cuda" if hasattr(torch, "cuda") and torch.cuda.is_available() else "cpu"
     # Model selection (keep minimal)
@@ -208,7 +315,7 @@ def _run_real(spec: Dict[str, Any]) -> Dict[str, Any]:
         if step >= max_train_steps:
             break
 
-    # Validate
+    # Validate (val split)
     model.eval()
     correct = 0
     total = 0
@@ -220,7 +327,20 @@ def _run_real(spec: Dict[str, Any]) -> Dict[str, Any]:
             pred = logits.argmax(dim=1)
             correct += (pred == yb).sum().item()
             total += yb.numel()
-    acc = float(correct) / float(total) if total else 0.0
+    val_acc = float(correct) / float(total) if total else 0.0
+
+    # Test evaluation
+    correct_t = 0
+    total_t = 0
+    with torch.no_grad():
+        for xb, yb in dl_test:
+            xb = xb.to(device)
+            yb = yb.to(device)
+            logits = model(xb)
+            pred = logits.argmax(dim=1)
+            correct_t += (pred == yb).sum().item()
+            total_t += yb.numel()
+    test_acc = float(correct_t) / float(total_t) if total_t else 0.0
 
     finished = _now()
     return {
@@ -228,7 +348,7 @@ def _run_real(spec: Dict[str, Any]) -> Dict[str, Any]:
         "reason": "ok",
         "started": started,
         "finished": finished,
-        "metrics": {"val_accuracy": acc},
+        "metrics": {"val_accuracy": val_acc, "test_accuracy": test_acc},
         "meta": {
             "device": device,
             "num_classes": num_classes,

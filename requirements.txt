@@ -2,5 +2,6 @@ requests
 python-dotenv
 pypdf
 numpy
+pyyaml
 torch; sys_platform == 'linux' or sys_platform == 'darwin'
 torchvision; sys_platform == 'linux' or sys_platform == 'darwin'

@@ -35,6 +35,19 @@ Environment Setup (Windows + Git‑Bash)
   - TIME_BUDGET_SEC=0 (0 disables budgeting) • PARALLEL_RUNS=false • MUTATE_K=0 • REPEAT_N=1
   - LLM cache: LLM_CACHE=true • LLM_CACHE_DIR=.cache/llm
 
+YAML Config Override (project‑level)
+
+- Place a `config.yaml` (or `.yml` / `.json`) at repo root to override settings globally. YAML takes precedence over env/defaults.
+- Example:
+  
+  dataset:
+    name: cifar10
+    path: data/cifar10
+    allow_fallback: true     # allow torchvision FakeData when real data missing
+    allow_download: true     # allow CIFAR10 download
+  
+- You can also point to a custom file with `CONFIG_FILE=path/to/config.yaml`.
+
 Dependency Install (pip)
 
 - Install core dependencies:
@@ -110,6 +123,9 @@ Rollback / Safe switches
 
 Notes
 
+- Domain‑agnostic: Set your project `goal` in `config.yaml`; prompts adapt to it. No hard‑coded domain defaults.
+- Dataset via YAML: `dataset.kind` imagefolder|cifar10|custom, `dataset.path`, and `dataset.splits` control train/val/test. CIFAR10 uses a train/val split (val_fraction) and official test for evaluation.
+- Evaluation: selection uses validation; reports highlight test metrics by default.
 - .env is loaded by python‑dotenv; do not commit secrets.
 - LLM caching is enabled by default (LLM_CACHE=true); cached JSON lives under .cache/llm/.
 - MLflow is optional and disabled by default. Enable with MLFLOW_ENABLED=true and set MLFLOW_TRACKING_URI if desired.

@@ -13,6 +13,8 @@ from lab.logging_utils import capture_env, try_mlflow_log
 from lab.report_html import write_dashboard
 from lab.mutations import propose_mutations  # type: ignore
 from lab.plot_utils import maybe_save_accuracy_bar  # type: ignore
+from lab.config import get
+from lab.config import dataset_path_for
 
 
 load_dotenv()
@@ -37,8 +39,9 @@ def _write_json(path: pathlib.Path, obj: Any) -> None:
 
 
 def propose_baseline_and_novelty(novelty: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
+    topic = str(get("project.goal", "your task") or "your task")
     system = (
-        "You are an AI scientist. Propose two minimal experiment specs for skin-cancer classification: "
+        "You are an AI scientist. Propose two minimal experiment specs for " + topic + ": "
         "(1) a baseline using standard components, (2) a novelty variant incorporating a single, concrete novelty; "
         "and (3) an ablation that removes the novelty component from (2) only. Keep runnable on CPU in <= 1 epoch and small steps. Return JSON."
     )
@@ -163,7 +166,7 @@ def analyze_and_decide(results: List[Dict[str, Any]], target_delta: float = 0.00
 def verify_and_fix_spec(spec: Dict[str, Any]) -> Dict[str, Any]:
     """Simple verifier/normalizer that enforces ranges and required fields."""
     fixed = dict(spec)
-    fixed.setdefault("dataset_path", "data/isic")
+    fixed.setdefault("dataset_path", dataset_path_for())
     # ranges
     def clamp(v, lo, hi, cast):
         try:

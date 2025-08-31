@@ -5,6 +5,7 @@ from typing import Any, Dict
 from dotenv import load_dotenv
 from llm_utils import chat_json, LLMError
 from lab.experiment_runner import run_experiment
+from lab.config import dataset_path_for, get
 
 
 load_dotenv()
@@ -20,8 +21,9 @@ def _ensure_dirs() -> None:
 
 
 def propose_experiment(novelty: Dict[str, Any]) -> Dict[str, Any]:
+    topic = str(get("project.goal", "your task") or "your task")
     system = (
-        "You are an AI scientist planning a minimal, runnable deep-learning experiment for skin-cancer classification. "
+        "You are an AI scientist planning a minimal, runnable deep-learning experiment for " + topic + ". "
         "Given themes and new ideas, propose a concrete spec using accessible components. Keep it simple and runnable "
         "on limited compute (<= 1 epoch, small steps)."
     )
@@ -54,7 +56,7 @@ def propose_experiment(novelty: Dict[str, Any]) -> Dict[str, Any]:
     spec = {
         "title": js.get("title") or "Skin Cancer Experiment",
         "dataset_name": js.get("dataset_name") or "ISIC",
-        "dataset_path": js.get("dataset_path") or "data/isic",
+        "dataset_path": js.get("dataset_path") or dataset_path_for(),
         "input_size": int(js.get("input_size") or 224),
         "model": js.get("model") or "resnet18",
         "epochs": int(js.get("epochs") or 1),
@@ -111,4 +113,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
