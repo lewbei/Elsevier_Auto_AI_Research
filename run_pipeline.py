@@ -5,6 +5,7 @@ import subprocess
 import shutil
 from pathlib import Path
 from lab.config import get_bool
+from lab.logging_utils import get_log_level
 
 
 HERE = Path(__file__).parent.resolve()
@@ -36,6 +37,7 @@ def run_step(py: str, args: list[str]) -> None:
 
 def main() -> None:
     py = win_python_path()
+    print(f"[INFO] LOG_LEVEL={get_log_level()}")
     # Quick env checks (don’t fail early on missing insttoken)
     missing = []
     if not os.getenv("ELSEVIER_KEY"):

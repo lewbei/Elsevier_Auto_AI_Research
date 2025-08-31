@@ -4,6 +4,7 @@ import platform
 import sys
 from pathlib import Path
 from typing import Any, Dict
+import datetime
 
 
 def ensure_dir(p: Path) -> None:
@@ -63,6 +64,42 @@ def append_jsonl(path: Path, obj: Any) -> None:
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(obj, ensure_ascii=False))
         f.write("\n")
+
+
+# ---- Verbose/Debug console helpers ----
+def _log_level_env() -> str:
+    lvl = os.getenv("LOG_LEVEL", "") or os.getenv("LOGLEVEL", "") or os.getenv("LEVEL", "")
+    lvl = (lvl or "").strip().lower()
+    if lvl in {"trace", "debug", "info", "warn", "warning", "error"}:
+        return lvl
+    # Back-compat: VERBOSE=1 implies debug
+    if str(os.getenv("VERBOSE", "")).lower() in {"1", "true", "yes", "on"}:
+        return "debug"
+    return "info"
+
+
+def get_log_level() -> str:
+    """Return effective log level string: debug|info|warn|error."""
+    lvl = _log_level_env()
+    if lvl in {"trace", "debug"}:
+        return "debug"
+    if lvl in {"warn", "warning"}:
+        return "warn"
+    if lvl in {"error"}:
+        return "error"
+    return "info"
+
+
+def is_verbose() -> bool:
+    """True when debug-level logging is enabled via env/config."""
+    return get_log_level() == "debug"
+
+
+def vprint(msg: str) -> None:
+    """Print a line only in verbose (debug) mode with timestamp."""
+    if is_verbose():
+        ts = datetime.datetime.now().strftime("%H:%M:%S")
+        print(f"[DBG {ts}] {msg}")
 
 
 def try_mlflow_log(run_name: str, params: Dict[str, Any], metrics: Dict[str, Any], tags: Dict[str, Any] | None = None) -> None:

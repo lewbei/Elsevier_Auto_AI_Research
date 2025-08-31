@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 from utils.pdf_utils import extract_text_from_pdf
 from utils.llm_utils import chat_json, LLMError
 from lab.config import get
+from lab.logging_utils import is_verbose, vprint
 
 
 load_dotenv()
@@ -282,6 +283,13 @@ def main() -> None:
     }
     with open(REPORT_PATH, "w", encoding="utf-8") as f:
         json.dump(final, f, ensure_ascii=False, indent=2)
+    if is_verbose():
+        try:
+            theme_names = [str(t.get("name") or "") for t in (final.get("themes") or [])]
+            vprint("Novelty summary: num_papers=" + str(final.get("num_papers")) + 
+                   ", themes=" + ", ".join([t for t in theme_names if t]))
+        except Exception:
+            pass
     print(f"[DONE] Wrote novelty report: {REPORT_PATH}")
 
     # Write light literature stats

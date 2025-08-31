@@ -137,3 +137,40 @@ Rollback
 
 - Keep thin compatibility wrappers at the repo root so external users importing legacy names continue working.
 - If needed, revert moves by restoring files to the top level and removing new package paths.
+
+
+Verbose Mode + Detailed Logging
+
+Checklist (what I will do)
+
+- Add global verbose toggle (LOG_LEVEL/VERBOSE)
+- Trace LLM payload/response to logs/llm
+- Print experiment/spec details when verbose
+- Update docs and .env example
+- Compile and run pytest
+
+Plan
+
+- Introduce debug helpers in lab/logging_utils.py: get_log_level(), is_verbose(), vprint().
+- Add optional LLM logging in utils/llm_utils.py gated by LLM_LOG or LOG_LEVEL=debug; write JSON files to logs/llm/ and echo paths when verbose.
+- Surface details in runners/agents when verbose: spec summaries, stub reasons, metrics, and plan summaries.
+- Document toggles in AGENTS.md and .env.example.
+
+Steps
+
+1) Add helpers to lab/logging_utils.py
+2) Add LLM logging to utils/llm_utils.py
+3) Instrument experiment runner and agents for verbose prints
+4) Update .env.example and AGENTS.md
+5) Compile repo and run pytest
+
+Risks
+
+- Excessive console noise if left on; default remains info
+- Minor I/O overhead for LLM logs; gated behind flags
+- Windows CRLF/encoding concerns; file I/O uses utf-8
+
+Rollback
+
+- Disable by setting LOG_LEVEL=info and LLM_LOG=0
+- Remove logs/llm/ if space is a concern

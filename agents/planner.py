@@ -5,7 +5,7 @@ import os
 
 from dotenv import load_dotenv
 from utils.llm_utils import chat_json_cached, LLMError
-from lab.logging_utils import append_jsonl
+from lab.logging_utils import append_jsonl, is_verbose, vprint
 from lab.prompt_overrides import load_prompt
 from lab.config import dataset_name, dataset_path_for, get, get_bool
 try:
@@ -195,6 +195,11 @@ def main() -> None:
         return
 
     PLAN_PATH.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
+    if is_verbose():
+        try:
+            vprint("Plan: " + json.dumps(plan, ensure_ascii=False, indent=2))
+        except Exception:
+            pass
     print(f"[DONE] Wrote plan to {PLAN_PATH}")
 
 

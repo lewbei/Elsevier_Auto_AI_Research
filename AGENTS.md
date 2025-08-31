@@ -41,6 +41,11 @@ Environment Setup (Windows + Git‑Bash)
   - SKIP_NOVELTY=1 to skip Step 2 (novelty)
   - SKIP_PLANNER=1 to skip Step 2.5 (planner)
   - SKIP_ITERATE=1 to skip Step 3 (iterate)
+  - Verbose + LLM tracing:
+    - LOG_LEVEL=debug to print detailed progress to console
+    - VERBOSE=1 alias for debug mode
+    - LLM_LOG=1 to write LLM payloads/responses under logs/llm/
+    - LLM_COST_INPUT_PER_1K / LLM_COST_OUTPUT_PER_1K to compute per-call costs and aggregate totals
 
 YAML Config Override (project‑level)
 

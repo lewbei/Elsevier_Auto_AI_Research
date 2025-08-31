@@ -7,7 +7,7 @@ from typing import Any, Dict, List
 from dotenv import load_dotenv
 
 from lab.config import get, get_bool
-from lab.logging_utils import append_jsonl
+from lab.logging_utils import append_jsonl, is_verbose, vprint
 from lab.codegen_llm import write_generated_aug_from_llm  # type: ignore
 from lab.code_edit_loop import run_codegen_editor  # type: ignore
 from lab.experiment_runner import run_experiment
@@ -139,6 +139,11 @@ def main() -> None:
             (out_dir / f"step_{i}_spec.json").write_text(json.dumps(spec, indent=2), encoding="utf-8")
             (out_dir / f"step_{i}_metrics.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
             append_jsonl(session_log, {"role": "runner", "content": {"iter": i, "metrics": result.get("metrics", {})}})
+            if is_verbose():
+                try:
+                    vprint(f"Interactive step {i} metrics: {result.get('metrics', {})}")
+                except Exception:
+                    pass
             # Early stop if accuracy improved significantly vs 0 baseline
             acc = float(result.get("metrics", {}).get("val_accuracy", 0.0) or 0.0)
             if acc >= target_delta:
@@ -161,4 +166,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

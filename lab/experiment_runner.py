@@ -6,6 +6,7 @@ import random
 import os
 import importlib
 from lab.config import dataset_name, dataset_path_for, get_bool, dataset_kind, dataset_splits, get
+from lab.logging_utils import vprint, is_verbose
 
 
 def _now() -> str:
@@ -42,6 +43,22 @@ def dataset_choice() -> str:
 
 
 def _run_real(spec: Dict[str, Any]) -> Dict[str, Any]:
+    # Verbose: show spec summary before attempting real/stub run
+    if is_verbose():
+        try:
+            import json as _json
+            vprint("Spec summary: " + _json.dumps({
+                "dataset_path": spec.get("dataset_path"),
+                "input_size": spec.get("input_size"),
+                "batch_size": spec.get("batch_size"),
+                "epochs": spec.get("epochs"),
+                "lr": spec.get("lr"),
+                "max_train_steps": spec.get("max_train_steps"),
+                "model": spec.get("model"),
+                "novelty_component": spec.get("novelty_component", {}),
+            }, ensure_ascii=False))
+        except Exception:
+            pass
     try:
         import torch  # type: ignore
         import torchvision  # type: ignore
@@ -51,13 +68,16 @@ def _run_real(spec: Dict[str, Any]) -> Dict[str, Any]:
         from torchvision.datasets import ImageFolder  # type: ignore
         from torchvision.models import resnet18  # type: ignore
     except Exception as exc:  # pragma: no cover
-        return {
+        res = {
             "mode": "stub",
             "reason": f"Missing torch/torchvision: {exc}",
             "started": _now(),
             "finished": _now(),
             "metrics": {"val_accuracy": 0.0},
         }
+        if is_verbose():
+            vprint("Runner mode=stub reason=missing torch/vision")
+        return res
 
     seed = int(spec.get("seed") or 42)
     _seed_everything(seed)
@@ -155,13 +175,16 @@ def _run_real(spec: Dict[str, Any]) -> Dict[str, Any]:
             ds_test = FakeData(size=int(spec.get("fallback_test_size", 50)), image_size=(3, input_size, input_size),
                                num_classes=num_classes, transform=tfm_val)
         else:
-            return {
+            res = {
                 "mode": "stub",
                 "reason": f"ImageFolder dataset not found under {data_dir} (expect {train_dir.name}/ and {val_dir.name}/ folders)",
                 "started": _now(),
                 "finished": _now(),
                 "metrics": {"val_accuracy": 0.0, "test_accuracy": 0.0},
             }
+            if is_verbose():
+                vprint(res["reason"])
+            return res
     elif kind == "cifar10":
         try:
             from torchvision.datasets import CIFAR10, FakeData  # type: ignore
@@ -201,13 +224,16 @@ def _run_real(spec: Dict[str, Any]) -> Dict[str, Any]:
                 ds_test = FakeData(size=int(spec.get("fallback_test_size", 50)), image_size=(3, input_size, input_size),
                                    num_classes=num_classes, transform=tfm_val)
             else:
-                return {
+                res = {
                     "mode": "stub",
                     "reason": "CIFAR10 unavailable and download disabled; set ALLOW_DATASET_DOWNLOAD or ALLOW_FALLBACK_DATASET",
                     "started": _now(),
                     "finished": _now(),
                     "metrics": {"val_accuracy": 0.0, "test_accuracy": 0.0},
                 }
+                if is_verbose():
+                    vprint(res["reason"])
+                return res
     elif kind == "custom":
         # Optional: load custom dataset classes from config
         # Expect config keys under dataset.custom.{train,val} with module/class/kwargs
@@ -270,13 +296,16 @@ def _run_real(spec: Dict[str, Any]) -> Dict[str, Any]:
             except Exception:
                 num_classes = int(spec.get("num_classes", 2))
     else:
-        return {
+        res = {
             "mode": "stub",
             "reason": f"Unknown dataset kind: {kind}",
             "started": _now(),
             "finished": _now(),
             "metrics": {"val_accuracy": 0.0, "test_accuracy": 0.0},
         }
+        if is_verbose():
+            vprint(res["reason"])
+        return res
 
     dl_train = DataLoader(ds_train, batch_size=batch_size, shuffle=True, num_workers=0)
     dl_val = DataLoader(ds_val, batch_size=batch_size, shuffle=False, num_workers=0)
@@ -369,7 +398,7 @@ def _run_real(spec: Dict[str, Any]) -> Dict[str, Any]:
     test_acc = float(correct_t) / float(total_t) if total_t else 0.0
 
     finished = _now()
-    return {
+    res = {
         "mode": "real",
         "reason": "ok",
         "started": started,
@@ -381,6 +410,9 @@ def _run_real(spec: Dict[str, Any]) -> Dict[str, Any]:
             "seed": seed,
         },
     }
+    if is_verbose():
+        vprint(f"Completed real run: val_acc={val_acc:.4f} test_acc={test_acc:.4f} device={device}")
+    return res
 
 
 def run_experiment(spec: Dict[str, Any]) -> Dict[str, Any]:
@@ -391,10 +423,13 @@ def run_experiment(spec: Dict[str, Any]) -> Dict[str, Any]:
     try:
         return _run_real(spec)
     except Exception as exc:  # pragma: no cover
-        return {
+        res = {
             "mode": "stub",
             "reason": f"Exception in real runner: {exc}",
             "started": _now(),
             "finished": _now(),
             "metrics": {"val_accuracy": 0.0},
         }
+        if is_verbose():
+            vprint(res["reason"])
+        return res
