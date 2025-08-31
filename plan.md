@@ -1,4 +1,33 @@
- Repository Restructure Roadmap
+ Paper Finder Progress Reporting (Windows + Git‑Bash)
+
+Checklist (what I will do)
+
+- Add counters for skip reasons and totals
+- Include baseline counts from CSV/PDFs
+- Print remaining to reach MAX_KEPT
+- Compile and run pytest on Windows Python
+- Share usage notes and rollback
+
+Plan
+
+- Extend agents.paper_finder to: seed dedupe from existing CSV as before, but also count previously kept rows; compute remaining target as MAX_KEPT - (kept_csv + kept_this_run); print progress in [SKIP]/[JUDGED]/[DONE] lines.
+
+Steps
+
+1) Implement counters + baseline summary in paper_finder
+2) Compile sources and run pytest
+3) Validate messaging with a dry run (user env)
+
+Risks
+
+- Missing API keys stop paper_finder at runtime; tests do not cover it
+- Windows path quirks when printing CSV/PDF paths
+
+Rollback
+
+- Revert agents/paper_finder.py to previous version via git if prints are too noisy
+
+Repository Restructure Roadmap
 
 Checklist (what I will do)
 

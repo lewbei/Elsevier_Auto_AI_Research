@@ -267,12 +267,15 @@ if __name__ == "__main__":
             w.writerow(["title","year","coverDate","doi","pii","prism_url","openaccess","relevant","reason","pdf_path"])
 
     processed = kept = downloaded = 0
+    skip_year = skip_dup = no_abs = 0
     # Track duplicates to avoid repeated LLM calls and CSV rows
     seen_dois = set()
     seen_piis = set()
     seen_urls = set()
 
     # Seed dedupe from existing CSV (if any) to support resuming without reprocessing
+    prev_kept = 0
+    prev_rows = 0
     try:
         if out_csv.exists():
             with open(out_csv, "r", encoding="utf-8", newline="") as f:
@@ -290,16 +293,35 @@ if __name__ == "__main__":
                             seen_piis.add(pii_prev)
                         if not doi_prev and not pii_prev and url_prev:
                             seen_urls.add(url_prev)
+                        prev_rows += 1
+                        # Col 7 (index 7) holds 'relevant' boolean per our header
+                        try:
+                            rel = row[7].strip().lower() if len(row) > 7 else ""
+                            if rel in {"true", "1", "yes"}:
+                                prev_kept += 1
+                        except Exception:
+                            pass
             print(f"[RESUME] Seeded dedupe from CSV: dois={len(seen_dois)} piis={len(seen_piis)} urls={len(seen_urls)}")
     except Exception as exc:
         print(f"[RESUME WARN] Failed to seed dedupe from CSV: {exc}")
+
+    # Count existing PDFs (for download progress context)
+    try:
+        existing_pdfs = sum(1 for _ in out_dir.glob("*.pdf")) if out_dir.exists() else 0
+    except Exception:
+        existing_pdfs = 0
+
+    # Baseline progress and remaining target
+    left_total = max(MAX_KEPT - prev_kept, 0)
+    print(f"[BASELINE] csv_rows={prev_rows} kept_csv={prev_kept} pdfs={existing_pdfs} target={MAX_KEPT} left_to_find={left_total}")
 
     for entry in search_sciencedirect(query, page_size):
         title = entry.get("dc:title") or ""
         cover_date = entry.get("prism:coverDate") or ""
         if not _year_ok(cover_date):
             y = cover_date.split("-", 1)[0] if cover_date else "NA"
-            print(f"[SKIP year] {title[:80]!r} year={y}")
+            skip_year += 1
+            print(f"[SKIP year] {title[:80]!r} year={y} | skip_year={skip_year}")
             continue
 
         doi       = (entry.get("prism:doi") or "").strip().lower() or None
@@ -316,7 +338,10 @@ if __name__ == "__main__":
         if not doi and not pii and prism_url and prism_url in seen_urls:
             is_dup = True
         if is_dup:
-            print(f"[SKIP DUP] {title[:80]!r} doi={doi or 'NA'} pii={pii or 'NA'}")
+            skip_dup += 1
+            total_kept_so_far = prev_kept + kept
+            left_now = max(MAX_KEPT - total_kept_so_far, 0)
+            print(f"[SKIP DUP] {title[:80]!r} doi={doi or 'NA'} pii={pii or 'NA'} | skip_dup={skip_dup} | kept_total={total_kept_so_far}/{MAX_KEPT} left={left_now}")
             continue
         # Mark as seen so later duplicates won't be reprocessed
         if doi:
@@ -328,7 +353,10 @@ if __name__ == "__main__":
 
         abstract = get_abstract(entry)
         if not abstract:
-            print(f"[NO ABSTRACT] {title[:80]!r}")
+            no_abs += 1
+            total_kept_so_far = prev_kept + kept
+            left_now = max(MAX_KEPT - total_kept_so_far, 0)
+            print(f"[NO ABSTRACT] {title[:80]!r} | no_abs={no_abs} | kept_total={total_kept_so_far}/{MAX_KEPT} left={left_now}")
             continue
 
         relevant, reason = judge_relevance_deepseek(title, abstract, query)
@@ -353,7 +381,9 @@ if __name__ == "__main__":
                     else:
                         print(f"[DL FAIL] {title[:80]!r} :: {path_or_err}")
 
-        print(f"[JUDGED] relevant={relevant} | kept={kept}/{processed} | downloaded={downloaded} :: {title[:90]}")
+        total_kept_so_far = prev_kept + kept
+        left_now = max(MAX_KEPT - total_kept_so_far, 0)
+        print(f"[JUDGED] relevant={relevant} | kept_run={kept}/{processed} | kept_total={total_kept_so_far}/{MAX_KEPT} left={left_now} | downloaded={downloaded} :: {title[:90]}")
 
         with open(out_csv, "a", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
@@ -361,9 +391,13 @@ if __name__ == "__main__":
             w.writerow([title, y, cover_date, doi, pii, prism_url, oa, relevant, reason, pdf_path])
 
         # Stop once we have enough relevant papers
-        if kept >= MAX_KEPT:
-            print(f"[STOP] Reached MAX_KEPT={MAX_KEPT}. Halting further processing.")
+        if prev_kept + kept >= MAX_KEPT:
+            print(f"[STOP] Reached MAX_KEPT={MAX_KEPT} (kept_total={prev_kept + kept}). Halting further processing.")
             break
 
-    print(f"\n[DONE] processed={processed}, kept={kept}, downloaded={downloaded}, csv={out_csv.resolve()}, dir={out_dir.resolve()}")
-
+    print(
+        "\n[DONE] "
+        f"processed={processed}, kept_run={kept}, kept_csv={prev_kept}, kept_total={prev_kept + kept}, "
+        f"downloaded_run={downloaded}, skip_dup={skip_dup}, skip_year={skip_year}, no_abstract={no_abs}, "
+        f"csv={out_csv.resolve()}, dir={out_dir.resolve()}"
+    )
