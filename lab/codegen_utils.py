@@ -1,3 +1,11 @@
+"""Utilities for generating small augmentation or model-head modules.
+
+The helpers here write tiny Python files based on text descriptions so that
+experiments can dynamically compose augmentations or heads without shipping a
+full CLI or config parser.  Generated files are lightweight and intentionally
+limited to a safe subset of torchvision transforms.
+"""
+
 from pathlib import Path
 from typing import Optional
 import importlib.util
@@ -28,6 +36,7 @@ class GeneratedAug:
 
 
 def _map_description_to_transforms(description: str) -> str:
+    """Convert a free-form description into a torchvision transforms snippet."""
     desc = (description or "").lower()
     parts = []
     # Very small, safe set
@@ -45,6 +54,7 @@ def _map_description_to_transforms(description: str) -> str:
 
 
 def write_generated_aug(description: str, out: Optional[Path] = None) -> Path:
+    """Write a small augmentation module based on a text description."""
     out = out or Path(__file__).parent / "generated_aug.py"
     code = TEMPLATE.replace("{{TRANSFORMS}}", _map_description_to_transforms(description))
     out.write_text(code, encoding="utf-8")
@@ -70,6 +80,7 @@ class GeneratedHead(nn.Module):
 
 
 def write_generated_head(out: Optional[Path] = None) -> Path:
+    """Write the `GeneratedHead` module to disk and return the path."""
     out = out or Path(__file__).parent / "generated_head.py"
     out.write_text(HEAD_TEMPLATE, encoding="utf-8")
     return out
@@ -77,6 +88,7 @@ def write_generated_head(out: Optional[Path] = None) -> Path:
 
 # ---- Guardrails / sanity checks for generated modules ----
 def _import_from_path(module_path: Path, module_name: str):
+    """Import a module given its file path without modifying sys.path permanently."""
     spec = importlib.util.spec_from_file_location(module_name, str(module_path))
     if spec is None or spec.loader is None:
         raise ImportError(f"Cannot load spec for {module_name}")

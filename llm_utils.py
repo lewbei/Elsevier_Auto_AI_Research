@@ -1,3 +1,11 @@
+"""Lightweight helpers for calling the DeepSeek chat API.
+
+This module centralizes HTTP calls, basic retry logic, and a tiny on-disk
+cache so other modules can interact with the LLM through a small surface
+area. Functions here intentionally avoid advanced CLI or parser features to
+keep usage simple and focused on programmatic access.
+"""
+
 import os
 import time
 import json
@@ -20,10 +28,11 @@ LLM_CACHE_ENABLED = os.getenv("LLM_CACHE", "true").lower() in {"1", "true", "yes
 
 
 class LLMError(RuntimeError):
-    pass
+    """Raised when the LLM client encounters a fatal error."""
 
 
 def _headers() -> Dict[str, str]:
+    """Return HTTP headers for DeepSeek requests, validating the API key."""
     if not DEEPSEEK_API_KEY:
         raise LLMError("DEEPSEEK_API_KEY not set")
     return {
@@ -90,6 +99,7 @@ def chat_json(system: str, user: str, *, temperature: float = 0.0, model: Option
 
 
 def _hash_payload(prefix: str, payload: Dict[str, Any]) -> str:
+    """Create a deterministic hash of a payload for cache keying."""
     h = hashlib.sha256()
     h.update(prefix.encode("utf-8"))
     h.update(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8"))
@@ -98,6 +108,7 @@ def _hash_payload(prefix: str, payload: Dict[str, Any]) -> str:
 
 def chat_json_cached(system: str, user: str, *, temperature: float = 0.0, model: Optional[str] = None,
                      timeout: int = 60, max_tries: int = 4) -> Dict[str, Any]:
+    """Cached variant of :func:`chat_json` using a simple on-disk store."""
     payload = {
         "model": model or DEEPSEEK_MODEL,
         "messages": [
@@ -127,6 +138,7 @@ def chat_json_cached(system: str, user: str, *, temperature: float = 0.0, model:
 
 def chat_text(messages: List[Dict[str, str]], *, temperature: float = 0.2, model: Optional[str] = None,
               timeout: int = 60, max_tries: int = 4) -> str:
+    """Return raw text from the chat API given a sequence of messages."""
     payload = {
         "model": model or DEEPSEEK_MODEL,
         "messages": messages,
