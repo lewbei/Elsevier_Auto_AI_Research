@@ -32,6 +32,7 @@ Environment Setup (Windows + Git‑Bash)
   - DATASET=isic|cifar10 (default is isic)
   - ALLOW_FALLBACK_DATASET=true to use torchvision FakeData if real dataset missing (requires torchvision)
   - ALLOW_DATASET_DOWNLOAD=true to allow CIFAR10 download (requires torchvision)
+  - MAX_ITERS=2 to control number of iterate cycles (default 2)
   - TIME_BUDGET_SEC=0 (0 disables budgeting) • PARALLEL_RUNS=false • MUTATE_K=0 • REPEAT_N=1
   - LLM cache: LLM_CACHE=true • LLM_CACHE_DIR=.cache/llm
 

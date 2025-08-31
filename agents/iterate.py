@@ -458,7 +458,14 @@ def main() -> None:
     except Exception as exc:
         print(f"[ERR] Failed to read novelty report: {exc}")
         return
-    iterate(novelty, max_iters=2)
+    # Allow overriding the number of iterations via env var MAX_ITERS (default=2)
+    try:
+        max_iters = int(os.getenv("MAX_ITERS", "2") or 2)
+        if max_iters < 1:
+            max_iters = 1
+    except Exception:
+        max_iters = 2
+    iterate(novelty, max_iters=max_iters)
 
 
 def select_best_run(runs: List[Dict[str, Any]]) -> Dict[str, Any]:
