@@ -35,6 +35,14 @@ def _load_novelty() -> Dict[str, Any]:
 
 
 def run_stage(name: str, novelty: Dict[str, Any], max_iters: int, env_overrides: Dict[str, str] | None = None) -> None:
+    """Execute a single stage of the research pipeline with environment overrides.
+    
+    Args:
+        name: Stage name for logging
+        novelty: Novelty report data
+        max_iters: Maximum iterations for this stage
+        env_overrides: Temporary environment variable overrides
+    """
     session_log = RUNS_DIR / "stage_session.jsonl"
     start = time.time()
     append_jsonl(session_log, {"event": "stage_start", "name": name, "ts": start})
@@ -58,6 +66,7 @@ def run_stage(name: str, novelty: Dict[str, Any], max_iters: int, env_overrides:
 
 
 def main() -> None:
+    """Execute the complete staged research pipeline."""
     novelty = _load_novelty()
     global_budget = float(os.getenv("STAGE_BUDGET_SEC", "0") or 0)
     stage_start = time.time()
