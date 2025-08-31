@@ -1,0 +1,63 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments
+.env
+.venv
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# VS Code
+.vscode/
+.history/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Build / Dist
+build/
+dist/
+*.egg-info/
+
+# Data and cache
+logs/
+mlruns/
+Downloads/
+downloads/
+data/
+*.log
+
+# Papers / artifacts
+paper/*.pdf
+paper/*.aux
+paper/*.out
+paper/*.bbl
+paper/*.blg
+paper/*.toc
+paper/*.synctex.gz
+
+# Plots and reports
+runs/
+reports/
+
+# PDFs
+pdfs/
+
+# Local configs
+*.local.json
+*.secret.json
+
+# IDE
+.idea/
+*.iml
+
+# Misc
+*.tmp
+*.bak
+~$*

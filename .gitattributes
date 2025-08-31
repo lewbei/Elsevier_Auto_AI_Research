@@ -1,0 +1,18 @@
+* text=auto eol=lf
+
+# Treat notebooks as binary to avoid noisy diffs
+*.ipynb -diff -merge
+
+# Make shell/batch scripts always LF/CRLF as appropriate
+*.sh text eol=lf
+*.bat text eol=crlf
+
+# Ensure Python files normalized
+*.py text eol=lf
+
+# Images as binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.svg text
