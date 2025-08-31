@@ -70,26 +70,26 @@ Pipeline Runbook (step‑by‑step)
 
 1) Find and download papers (Elsevier + DeepSeek relevance)
    - Pre‑req: set ELSEVIER_KEY and DEEPSEEK_API_KEY in .env
-   - cmd.exe /C "python paper_finder"
+   - cmd.exe /C "python paper_finder.py"
    - Outputs: abstract_screen_deepseek.csv and pdfs/*.pdf
    - If you prefer to skip this and use your own PDFs, just place them under pdfs/ and move on.
 
 2) Summarize, critique, and synthesize novelty
-   - cmd.exe /C "python agents_novelty.py"
+   - cmd.exe /C "python -m agents.novelty"
    - Output: data/novelty_report.json
 
 3) Derive a compact research plan (multi‑agent with offline fallback)
-   - cmd.exe /C "python agents_planner.py"
+   - cmd.exe /C "python -m agents.planner"
    - Output: data/plan.json (plus data/plan_session.jsonl logs)
 
 4) Iterative experiments (baseline/novelty/ablation + variants)
    - Defaults run safely even without torch/torchvision (stub mode). To run minimally with synthetic data, set ALLOW_FALLBACK_DATASET=true and install torchvision.
-   - cmd.exe /C "python agents_iterate.py"
+   - cmd.exe /C "python -m agents.iterate"
    - Outputs: runs/, experiments/, runs/summary.json, runs/best.json, runs/dashboard.html, runs/accuracy.png
 
 5) Write paper draft (optional)
    - Enable with WRITE_PAPER=1 (or set env for the command):
-   - cmd.exe /C "set WRITE_PAPER=1&& python agents_write_paper.py"
+   - cmd.exe /C "set WRITE_PAPER=1&& python -m agents.write_paper"
    - Outputs: paper/paper.md and paper/main.tex (+ refs.bib built from CSV if present). Attempts pdflatex if available.
 
 One‑shot pipeline

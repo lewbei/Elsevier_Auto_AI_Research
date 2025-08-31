@@ -12,9 +12,9 @@ dataset:
   # kind: imagefolder | cifar10 | custom (optional; inferred when omitted)
   kind: imagefolder
   # Free-form label; does not gate behavior
-  name: isic
+  name: default
   # Base path; for imagefolder expects split subfolders
-  path: data/isic
+  path: data/dataset
   # Optional split folder names
   splits:
     train: train

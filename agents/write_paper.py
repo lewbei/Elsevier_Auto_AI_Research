@@ -1,8 +1,7 @@
 """Generate a short paper draft from experiment artifacts.
 
-The script reads data produced by other agents and emits Markdown and LaTeX
-summaries. It is intentionally minimal and avoids any CLI or parsing layer so
-it can be invoked directly from Python.
+Packaged version of the top-level script. Generates Markdown and LaTeX
+summaries from pipeline artifacts.
 """
 
 import json
@@ -23,12 +22,10 @@ PAPER_DIR = pathlib.Path("paper")
 
 
 def _ensure_dirs() -> None:
-    """Create the paper output directory if it does not exist."""
     PAPER_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _read_json(path: pathlib.Path) -> Dict[str, Any]:
-    """Best-effort JSON loader that falls back to an empty dict."""
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
@@ -36,9 +33,6 @@ def _read_json(path: pathlib.Path) -> Dict[str, Any]:
 
 
 def _best_acc(runs: List[Dict[str, Any]], name_contains: str, prefer_metric: str = "test_accuracy") -> float:
-    """Return the highest accuracy for runs matching a name snippet.
-    Prefers `prefer_metric` (e.g., test_accuracy) and falls back to val_accuracy.
-    """
     best = 0.0
     for r in runs:
         if name_contains in str(r.get("name")):
@@ -56,7 +50,6 @@ def _best_acc(runs: List[Dict[str, Any]], name_contains: str, prefer_metric: str
 
 
 def _render_md(title: str, novelty: Dict[str, Any], plan: Dict[str, Any], summary: Dict[str, Any]) -> str:
-    """Render the Markdown body of the paper given inputs from the pipeline."""
     runs = summary.get("runs", []) if isinstance(summary.get("runs"), list) else []
     baseline_acc = _best_acc(runs, "baseline")
     novelty_acc = _best_acc(runs, "novelty")
@@ -160,9 +153,6 @@ def _render_md(title: str, novelty: Dict[str, Any], plan: Dict[str, Any], summar
 
 
 def _render_latex(title: str, md_path: pathlib.Path, latex_table: str | None = None, include_fig: bool = False) -> str:
-    """Return a minimal LaTeX document referencing the Markdown draft."""
-    # Minimal LaTeX wrapper with natbib and optional refs inclusion.
-    # Users can refine into full templates later.
     return f"""\\documentclass[11pt]{{article}}
 \\usepackage[margin=1in]{{geometry}}
 \\usepackage[T1]{{fontenc}}
@@ -185,16 +175,11 @@ This is an auto-generated draft. Refer to {md_path.name} for Markdown version.
 
 
 def _sanitize_bib_key(s: str) -> str:
-    """Make a string safe to use as a BibTeX key."""
     keep = "".join(c for c in s if c.isalnum())
     return keep[:40] or "ref"
 
 
 def build_bibtex_from_csv(csv_path: pathlib.Path, out_dir: pathlib.Path) -> pathlib.Path | None:
-    """Read a CSV (like abstract_screen_deepseek.csv) and write refs.bib.
-    Expected columns: title, year, doi. Best-effort if fewer columns.
-    Returns the refs.bib path, or None if csv missing or empty.
-    """
     if not csv_path.exists():
         return None
     import csv
@@ -229,9 +214,6 @@ def build_bibtex_from_csv(csv_path: pathlib.Path, out_dir: pathlib.Path) -> path
 
 
 def _aggregate_from_summary(summary: Dict[str, Any]) -> Dict[str, Dict[str, float]]:
-    """Compute mean/std for baseline/novelty from the runs list in summary.
-    This mirrors agents_iterate.aggregate_repeats without importing it.
-    """
     import math
     runs = summary.get("runs", []) if isinstance(summary.get("runs"), list) else []
     groups = {"baseline": [], "novelty": []}
@@ -257,7 +239,6 @@ def _aggregate_from_summary(summary: Dict[str, Any]) -> Dict[str, Dict[str, floa
 
 
 def render_mean_std_table_md(agg: Dict[str, Dict[str, float]]) -> List[str]:
-    """Format aggregate statistics as a Markdown table."""
     lines = ["| Setting | N | Mean | Std |", "|---|---:|---:|---:|"]
     for k in ("baseline", "novelty"):
         if k in agg:
@@ -267,7 +248,6 @@ def render_mean_std_table_md(agg: Dict[str, Dict[str, float]]) -> List[str]:
 
 
 def render_mean_std_table_tex(agg: Dict[str, Dict[str, float]]) -> str:
-    """Format aggregate statistics as a LaTeX tabular block."""
     rows = []
     for k in ("baseline", "novelty"):
         if k in agg:
@@ -283,7 +263,6 @@ def render_mean_std_table_tex(agg: Dict[str, Dict[str, float]]) -> str:
 
 
 def try_pdflatex(tex_path: pathlib.Path) -> None:
-    """Compile the LaTeX document with pdflatex if available."""
     exe = shutil.which("pdflatex")
     if not exe:
         return
@@ -294,7 +273,6 @@ def try_pdflatex(tex_path: pathlib.Path) -> None:
 
 
 def main() -> None:
-    """Entry point for generating Markdown and LaTeX papers."""
     _ensure_dirs()
     novelty = _read_json(DATA_DIR / "novelty_report.json")
     plan = _read_json(DATA_DIR / "plan.json")
@@ -312,14 +290,12 @@ def main() -> None:
     md_path = PAPER_DIR / "paper.md"
     md_path.write_text(md, encoding="utf-8")
 
-    # Aggregate stats and build LaTeX content
     agg = _aggregate_from_summary(summary)
     latex_table = render_mean_std_table_tex(agg) if agg else None
     tex_path = PAPER_DIR / "main.tex"
     img_path = RUNS_DIR / "accuracy.png"
     tex_path.write_text(_render_latex(title, md_path, latex_table=latex_table, include_fig=img_path.exists()), encoding="utf-8")
 
-    # Optional: build refs.bib from CSV if present
     csv_default = pathlib.Path("abstract_screen_deepseek.csv")
     try:
         build_bibtex_from_csv(csv_default, PAPER_DIR)

@@ -59,10 +59,10 @@ def build_plan(novelty: Dict[str, Any]) -> Dict[str, Any]:
         return [str(x)]
 
     plan = {
-        "objective": str(js.get("objective") or "Evaluate a simple novelty on ISIC"),
+        "objective": str(js.get("objective") or "Evaluate a simple novelty"),
         "hypotheses": _as_list(js.get("hypotheses")),
         "success_criteria": js.get("success_criteria") or [{"metric": "val_accuracy", "delta_vs_baseline": 0.005}],
-        "datasets": js.get("datasets") or [{"name": dataset_name("ISIC").upper(), "path": dataset_path_for()}],
+        "datasets": js.get("datasets") or [{"name": dataset_name("DATA").upper(), "path": dataset_path_for()}],
         "baselines": _as_list(js.get("baselines") or ["resnet18 minimal"]),
         "novelty_focus": str(js.get("novelty_focus") or "augmentation and/or classifier head"),
         "stopping_rules": _as_list(js.get("stopping_rules") or ["stop if novelty beats baseline by >=0.5pp"]),
@@ -73,7 +73,7 @@ def build_plan(novelty: Dict[str, Any]) -> Dict[str, Any]:
 def make_plan_offline(novelty: Dict[str, Any]) -> Dict[str, Any]:
     """Offline fallback that derives a compact plan without LLM access."""
     themes = novelty.get("themes") or []
-    objective = "Evaluate a simple novelty on ISIC"
+    objective = "Evaluate a simple novelty"
     novelty_focus = "augmentation and/or classifier head"
     if themes and isinstance(themes, list):
         try:
@@ -86,7 +86,7 @@ def make_plan_offline(novelty: Dict[str, Any]) -> Dict[str, Any]:
         "objective": objective,
         "hypotheses": ["A small augmentation or head change improves val acc by ~0.5pp"],
         "success_criteria": [{"metric": "val_accuracy", "delta_vs_baseline": 0.005}],
-        "datasets": [{"name": dataset_name("ISIC").upper(), "path": dataset_path_for()}],
+        "datasets": [{"name": dataset_name("DATA").upper(), "path": dataset_path_for()}],
         "baselines": ["resnet18 minimal"],
         "novelty_focus": novelty_focus,
         "stopping_rules": ["stop if novelty beats baseline by >=0.5pp"],
@@ -129,7 +129,7 @@ def run_planning_session(novelty: Dict[str, Any]) -> Dict[str, Any]:
             "objective": str(rev.get("objective") or ""),
             "hypotheses": rev.get("hypotheses") or [],
             "success_criteria": rev.get("success_criteria") or [{"metric": "val_accuracy", "delta_vs_baseline": 0.005}],
-            "datasets": rev.get("datasets") or [{"name": "ISIC", "path": "data/isic"}],
+            "datasets": rev.get("datasets") or [{"name": dataset_name("DATA").upper(), "path": dataset_path_for()}],
             "baselines": rev.get("baselines") or ["resnet18 minimal"],
             "novelty_focus": str(rev.get("novelty_focus") or ""),
             "stopping_rules": rev.get("stopping_rules") or ["stop if novelty beats baseline by >=0.5pp"],
@@ -174,3 +174,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

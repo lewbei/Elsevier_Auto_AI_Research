@@ -6,7 +6,7 @@ from typing import Any, Dict
 
 from dotenv import load_dotenv
 from lab.logging_utils import append_jsonl
-from agents_iterate import iterate
+from agents.iterate import iterate
 
 
 load_dotenv()
@@ -30,7 +30,7 @@ def _summary_goal() -> bool:
 def _load_novelty() -> Dict[str, Any]:
     p = DATA_DIR / "novelty_report.json"
     if not p.exists():
-        raise SystemExit("Missing data/novelty_report.json. Run agents_novelty.py first.")
+        raise SystemExit("Missing data/novelty_report.json. Run agents.novelty first.")
     return _read_json(p)
 
 

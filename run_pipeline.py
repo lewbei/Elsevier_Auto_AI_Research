@@ -50,20 +50,20 @@ def main() -> None:
     (HERE / "logs").mkdir(exist_ok=True)
 
     # 1) Find + download papers (cap 40 kept, dedupe seeded from CSV)
-    run_step(py, ["paper_finder"])  # script without .py extension is fine
+    run_step(py, ["paper_finder.py"])  # call the script explicitly
 
     # 2) Summaries + novelty synthesis
-    run_step(py, ["agents_novelty.py"])
+    run_step(py, ["-m", "agents.novelty"])  # packaged agent
 
     # 2.5) Planner: derive a compact plan.json from novelty report
-    run_step(py, ["agents_planner.py"])
+    run_step(py, ["-m", "agents.planner"])  # packaged agent
 
     # 3) Iterative experiments (baseline/novelty/ablation + refine)
-    run_step(py, ["agents_iterate.py"])
+    run_step(py, ["-m", "agents.iterate"])  # packaged agent
 
     # 4) Optional: write paper draft (enable with WRITE_PAPER=1)
     if str(os.getenv("WRITE_PAPER", "")).lower() in {"1", "true", "yes"}:
-        run_step(py, ["agents_write_paper.py"])
+        run_step(py, ["-m", "agents.write_paper"])  # packaged agent
 
     print("\n[PIPELINE COMPLETE] Outputs:\n- PDFs: pdfs/\n- Summaries: data/summaries/\n- Novelty report: data/novelty_report.json\n- Plan: data/plan.json\n- Runs+reports: runs/\n- Paper draft: paper/ (if WRITE_PAPER=1)")
 
