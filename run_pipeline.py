@@ -4,6 +4,7 @@ import time
 import subprocess
 import shutil
 from pathlib import Path
+from lab.config import get_bool
 
 
 HERE = Path(__file__).parent.resolve()
@@ -55,7 +56,7 @@ def main() -> None:
         pdf_count = 0
 
     # 1) Find + download papers (cap 40 kept, dedupe seeded from CSV)
-    skip_find = str(os.getenv("SKIP_FIND_PAPERS", "")).lower() in {"1", "true", "yes"}
+    skip_find = get_bool("pipeline.skip.find_papers", False) or (str(os.getenv("SKIP_FIND_PAPERS", "")).lower() in {"1", "true", "yes"})
     auto_skip = pdf_count >= 40
     if skip_find or auto_skip:
         reason = "env SKIP_FIND_PAPERS" if skip_find else f"found {pdf_count} PDFs under pdfs/"
@@ -64,16 +65,33 @@ def main() -> None:
         run_step(py, ["-m", "agents.paper_finder"])  # packaged agent
 
     # 2) Summaries + novelty synthesis
-    run_step(py, ["-m", "agents.novelty"])  # packaged agent
+    novelty_path = HERE / "data" / "novelty_report.json"
+    skip_novelty = get_bool("pipeline.skip.novelty", False) or (str(os.getenv("SKIP_NOVELTY", "")).lower() in {"1", "true", "yes"})
+    if skip_novelty or novelty_path.exists():
+        reason = "env SKIP_NOVELTY" if skip_novelty else f"found {novelty_path}"
+        print(f"[SKIP] Step 2 (novelty) skipped ({reason}).")
+    else:
+        run_step(py, ["-m", "agents.novelty"])  # packaged agent
 
     # 2.5) Planner: derive a compact plan.json from novelty report
-    run_step(py, ["-m", "agents.planner"])  # packaged agent
+    plan_path = HERE / "data" / "plan.json"
+    skip_planner = get_bool("pipeline.skip.planner", False) or (str(os.getenv("SKIP_PLANNER", "")).lower() in {"1", "true", "yes"})
+    if skip_planner or plan_path.exists():
+        reason = "env SKIP_PLANNER" if skip_planner else f"found {plan_path}"
+        print(f"[SKIP] Step 2.5 (planner) skipped ({reason}).")
+    else:
+        run_step(py, ["-m", "agents.planner"])  # packaged agent
 
     # 3) Iterative experiments (baseline/novelty/ablation + refine)
-    run_step(py, ["-m", "agents.iterate"])  # packaged agent
+    skip_iter = get_bool("pipeline.skip.iterate", False) or (str(os.getenv("SKIP_ITERATE", "")).lower() in {"1", "true", "yes"})
+    if skip_iter:
+        print("[SKIP] Step 3 (iterate) skipped (env SKIP_ITERATE).")
+    else:
+        run_step(py, ["-m", "agents.iterate"])  # packaged agent
 
     # 4) Optional: write paper draft (enable with WRITE_PAPER=1)
-    if str(os.getenv("WRITE_PAPER", "")).lower() in {"1", "true", "yes"}:
+    write_paper = get_bool("pipeline.write_paper", False) or (str(os.getenv("WRITE_PAPER", "")).lower() in {"1", "true", "yes"})
+    if write_paper:
         run_step(py, ["-m", "agents.write_paper"])  # packaged agent
 
     print("\n[PIPELINE COMPLETE] Outputs:\n- PDFs: pdfs/\n- Summaries: data/summaries/\n- Novelty report: data/novelty_report.json\n- Plan: data/plan.json\n- Runs+reports: runs/\n- Paper draft: paper/ (if WRITE_PAPER=1)")

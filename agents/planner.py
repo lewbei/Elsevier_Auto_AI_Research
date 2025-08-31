@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 from utils.llm_utils import chat_json_cached, LLMError
 from lab.logging_utils import append_jsonl
 from lab.prompt_overrides import load_prompt
-from lab.config import dataset_name, dataset_path_for, get
+from lab.config import dataset_name, dataset_path_for, get, get_bool
 
 
 DATA_DIR = pathlib.Path("data")
@@ -160,8 +160,8 @@ def main() -> None:
         plan = make_plan_offline(novelty)
 
     # HITL confirmation gate
-    hitl = str(os.getenv("HITL_CONFIRM", "")).lower() in {"1", "true", "yes"}
-    auto = str(os.getenv("HITL_AUTO_APPROVE", "")).lower() in {"1", "true", "yes"}
+    hitl = get_bool("pipeline.hitl.confirm", False) or (str(os.getenv("HITL_CONFIRM", "")).lower() in {"1", "true", "yes"})
+    auto = get_bool("pipeline.hitl.auto_approve", False) or (str(os.getenv("HITL_AUTO_APPROVE", "")).lower() in {"1", "true", "yes"})
     if hitl and not auto:
         pending = DATA_DIR / "plan_pending.json"
         pending.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")

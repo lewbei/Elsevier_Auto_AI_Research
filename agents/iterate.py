@@ -13,7 +13,7 @@ from lab.logging_utils import capture_env, try_mlflow_log
 from lab.report_html import write_dashboard
 from lab.mutations import propose_mutations  # type: ignore
 from lab.plot_utils import maybe_save_accuracy_bar  # type: ignore
-from lab.config import get
+from lab.config import get, get_bool
 from lab.config import dataset_path_for
 
 
@@ -287,8 +287,8 @@ def iterate(novelty: Dict[str, Any], max_iters: int = 2) -> None:
         _write_json(EXPERIMENTS_DIR / f"{run_id}_ablation.json", ablation)
 
         # HITL confirmation gate for spec approval
-        hitl = str(os.getenv("HITL_CONFIRM", "")).lower() in {"1", "true", "yes"}
-        auto = str(os.getenv("HITL_AUTO_APPROVE", "")).lower() in {"1", "true", "yes"}
+        hitl = get_bool("pipeline.hitl.confirm", False) or (str(os.getenv("HITL_CONFIRM", "")).lower() in {"1", "true", "yes"})
+        auto = get_bool("pipeline.hitl.auto_approve", False) or (str(os.getenv("HITL_AUTO_APPROVE", "")).lower() in {"1", "true", "yes"})
         if hitl and not auto:
             pending = {
                 "iter": it,
@@ -458,13 +458,18 @@ def main() -> None:
     except Exception as exc:
         print(f"[ERR] Failed to read novelty report: {exc}")
         return
-    # Allow overriding the number of iterations via env var MAX_ITERS (default=2)
-    try:
-        max_iters = int(os.getenv("MAX_ITERS", "2") or 2)
-        if max_iters < 1:
-            max_iters = 1
-    except Exception:
-        max_iters = 2
+    # Allow overriding the number of iterations via YAML (pipeline.max_iters) or env MAX_ITERS (default=2)
+    max_iters_cfg = get("pipeline.max_iters", None)
+    max_iters = None
+    if isinstance(max_iters_cfg, int):
+        max_iters = max_iters_cfg
+    if max_iters is None:
+        try:
+            max_iters = int(os.getenv("MAX_ITERS", "2") or 2)
+        except Exception:
+            max_iters = 2
+    if max_iters < 1:
+        max_iters = 1
     iterate(novelty, max_iters=max_iters)
 
 

@@ -35,10 +35,14 @@ Environment Setup (Windows + Git‑Bash)
   - MAX_ITERS=2 to control number of iterate cycles (default 2)
   - TIME_BUDGET_SEC=0 (0 disables budgeting) • PARALLEL_RUNS=false • MUTATE_K=0 • REPEAT_N=1
   - LLM cache: LLM_CACHE=true • LLM_CACHE_DIR=.cache/llm
+  - SKIP_FIND_PAPERS=1 to skip Step 1 (paper_finder)
+  - SKIP_NOVELTY=1 to skip Step 2 (novelty)
+  - SKIP_PLANNER=1 to skip Step 2.5 (planner)
+  - SKIP_ITERATE=1 to skip Step 3 (iterate)
 
 YAML Config Override (project‑level)
 
-- Place a `config.yaml` (or `.yml` / `.json`) at repo root to override settings globally. YAML takes precedence over env/defaults.
+- Place a `config.yaml` (or `.yml` / `.json`) at repo root to override settings globally. YAML takes precedence where supported.
 - Example:
   
   dataset:
@@ -46,6 +50,18 @@ YAML Config Override (project‑level)
     path: data/cifar10
     allow_fallback: true     # allow torchvision FakeData when real data missing
     allow_download: true     # allow CIFAR10 download
+  
+  pipeline:
+    skip:
+      find_papers: true      # skip Step 1
+      novelty: true          # skip Step 2 (requires data/novelty_report.json)
+      planner: false         # run planner (writes data/plan.json)
+      iterate: false         # run iterate
+    max_iters: 5             # number of iteration cycles
+    write_paper: true        # write paper at the end
+    hitl:
+      confirm: false         # disable confirmation prompts
+      auto_approve: true     # auto-approve if confirm is enabled
   
 - You can also point to a custom file with `CONFIG_FILE=path/to/config.yaml`.
 
@@ -80,10 +96,12 @@ Pipeline Runbook (step‑by‑step)
 2) Summarize, critique, and synthesize novelty
    - cmd.exe /C "python -m agents.novelty"
    - Output: data/novelty_report.json
+   - Auto-skip when running run_pipeline if `data/novelty_report.json` already exists.
 
 3) Derive a compact research plan (multi‑agent with offline fallback)
    - cmd.exe /C "python -m agents.planner"
    - Output: data/plan.json (plus data/plan_session.jsonl logs)
+   - Auto-skip when running run_pipeline if `data/plan.json` already exists.
 
 4) Iterative experiments (baseline/novelty/ablation + variants)
    - Defaults run safely even without torch/torchvision (stub mode). To run minimally with synthetic data, set ALLOW_FALLBACK_DATASET=true and install torchvision.
@@ -95,10 +113,17 @@ Pipeline Runbook (step‑by‑step)
    - cmd.exe /C "set WRITE_PAPER=1&& python -m agents.write_paper"
    - Outputs: paper/paper.md and paper/main.tex (+ refs.bib built from CSV if present). Attempts pdflatex if available.
 
-One‑shot pipeline
+ One‑shot pipeline
 
 - Run everything (4 steps; paper drafting only if WRITE_PAPER=1):
   - cmd.exe /C "python run_pipeline.py"  (auto-skips Step 1 if 40+ PDFs present)
+  - With YAML-only control (no env flags): run the same command; pipeline will auto-skip steps per config.yaml and existing artifacts.
+
+- Skip early stages when artifacts already exist (examples):
+  - Skip finder and novelty, then run planner+iterate:  
+    cmd.exe /C "set SKIP_FIND_PAPERS=1&& set SKIP_NOVELTY=1&& python run_pipeline.py"
+  - Run only iterate (assumes data/novelty_report.json exists):  
+    cmd.exe /C "set SKIP_FIND_PAPERS=1&& set SKIP_NOVELTY=1&& set SKIP_PLANNER=1&& python -m agents.iterate"
 
 Validation and Artifacts
 

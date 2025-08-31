@@ -37,3 +37,20 @@ research:
   num_objectives: 2
   num_contributions: 2
   num_questions: 1
+
+# Pipeline controls (YAML-first). All are optional.
+pipeline:
+  # Skip stages automatically without CLI or env flags
+  skip:
+    find_papers: true
+    novelty: true
+    planner: false
+    iterate: false
+  # Number of iterate cycles (fallback to 2 if unset)
+  max_iters: 2
+  # Write paper draft at the end
+  write_paper: false
+  # Human-in-the-loop confirmation gates
+  hitl:
+    confirm: false
+    auto_approve: true
