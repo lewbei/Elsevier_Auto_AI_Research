@@ -35,6 +35,8 @@ Environment Setup (Windows + Git‑Bash)
   - MAX_ITERS=2 to control number of iterate cycles (default 2)
   - TIME_BUDGET_SEC=0 (0 disables budgeting) • PARALLEL_RUNS=false • MUTATE_K=0 • REPEAT_N=1
   - LLM cache: LLM_CACHE=true • LLM_CACHE_DIR=.cache/llm
+  - Codegen: CODEGEN_ENABLE=1 to enable LLM-driven augmentation code generation during iterate (see pipeline.codegen.enable)
+  - Code editor: CODEGEN_EDITOR=1 to enable LLM REPLACE/EDIT loop that writes lab/generated_train.py (see pipeline.codegen.editor.enable)
   - SKIP_FIND_PAPERS=1 to skip Step 1 (paper_finder)
   - SKIP_NOVELTY=1 to skip Step 2 (novelty)
   - SKIP_PLANNER=1 to skip Step 2.5 (planner)
@@ -62,6 +64,10 @@ YAML Config Override (project‑level)
     hitl:
       confirm: false         # disable confirmation prompts
       auto_approve: true     # auto-approve if confirm is enabled
+    codegen:
+      enable: true           # enable LLM-driven augmentation module generation (writes lab/generated_aug.py)
+      editor:
+        enable: true         # enable REPLACE/EDIT training hooks generation (writes lab/generated_train.py)
   
 - You can also point to a custom file with `CONFIG_FILE=path/to/config.yaml`.
 

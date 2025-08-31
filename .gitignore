@@ -19,6 +19,7 @@ env/
 # OS files
 .DS_Store
 Thumbs.db
+example
 
 # Build / Dist
 build/

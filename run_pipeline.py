@@ -55,6 +55,13 @@ def main() -> None:
     except Exception:
         pdf_count = 0
 
+    # 0) Optional full orchestrator: runs all phases end-to-end and returns
+    orch_enable = get_bool("pipeline.orchestrator.enable", False) or (str(os.getenv("ORCHESTRATOR_ENABLE", "")).lower() in {"1", "true", "yes"})
+    if orch_enable:
+        run_step(py, ["-m", "agents.orchestrator"])  # orchestrates all phases
+        print("[PIPELINE COMPLETE] (orchestrator)")
+        return
+
     # 1) Find + download papers (cap 40 kept, dedupe seeded from CSV)
     skip_find = get_bool("pipeline.skip.find_papers", False) or (str(os.getenv("SKIP_FIND_PAPERS", "")).lower() in {"1", "true", "yes"})
     auto_skip = pdf_count >= 40
@@ -83,6 +90,11 @@ def main() -> None:
         run_step(py, ["-m", "agents.planner"])  # packaged agent
 
     # 3) Iterative experiments (baseline/novelty/ablation + refine)
+    # 3a) Optional interactive multi-persona + executable code loop
+    skip_interactive = get_bool("pipeline.skip.interactive", False) or (str(os.getenv("SKIP_INTERACTIVE", "")).lower() in {"1", "true", "yes"})
+    enable_interactive = get_bool("pipeline.interactive.enable", False) or (str(os.getenv("INTERACTIVE_ENABLE", "")).lower() in {"1", "true", "yes"})
+    if enable_interactive and not skip_interactive:
+        run_step(py, ["-m", "agents.interactive"])  # optional interactive stage
     skip_iter = get_bool("pipeline.skip.iterate", False) or (str(os.getenv("SKIP_ITERATE", "")).lower() in {"1", "true", "yes"})
     if skip_iter:
         print("[SKIP] Step 3 (iterate) skipped (env SKIP_ITERATE).")

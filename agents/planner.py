@@ -8,6 +8,11 @@ from utils.llm_utils import chat_json_cached, LLMError
 from lab.logging_utils import append_jsonl
 from lab.prompt_overrides import load_prompt
 from lab.config import dataset_name, dataset_path_for, get, get_bool
+try:
+    # Optional: multi‑persona advice to inform planning
+    from agents.personas import DialogueManager  # type: ignore
+except Exception:
+    DialogueManager = None  # type: ignore
 
 
 DATA_DIR = pathlib.Path("data")
@@ -100,9 +105,30 @@ def run_planning_session(novelty: Dict[str, Any]) -> Dict[str, Any]:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     session_log = DATA_DIR / "plan_session.jsonl"
     try:
+        # Optional multi‑persona advisory pass (Professor/PhD/SW/ML)
+        persona_notes = []
+        try:
+            enable_personas = (
+                get_bool("pipeline.planner.personas.enable", False)
+                or (str(os.getenv("PLANNER_PERSONAS", "")).lower() in {"1", "true", "yes"})
+            )
+        except Exception:
+            enable_personas = False
+        if enable_personas and DialogueManager is not None:
+            try:
+                dm = DialogueManager()
+                # Prime with a single user message summarizing novelty
+                dm.post("User", "Please provide concise planning notes for this novelty report.")
+                # Collect short advice from each role
+                for role in ["PhD", "Professor", "SW", "ML"]:
+                    resp = dm.step_role(role, prompt="Provide 3 short bullet points to guide the plan. Be concrete.")
+                    persona_notes.append(f"[{role}] {resp.get('text','')}")
+            except Exception:
+                persona_notes = []
+
         # PI draft
         pi_system = load_prompt("planner_pi_system") or "You are the Principal Investigator. Propose a compact research plan JSON."
-        pi_user = json.dumps({"novelty_report": novelty}, ensure_ascii=False)
+        pi_user = json.dumps({"novelty_report": novelty, "persona_notes": persona_notes}, ensure_ascii=False)
         pi = chat_json_cached(pi_system, pi_user, temperature=0.0)
         append_jsonl(session_log, {"role": "PI", "content": pi})
 
@@ -111,7 +137,7 @@ def run_planning_session(novelty: Dict[str, Any]) -> Dict[str, Any]:
             "You are the Engineer. Tighten the plan to runnable specs and constraints (<=1 epoch, small steps). "
             "Return JSON with objective, hypotheses, success_criteria, datasets, baselines, novelty_focus, stopping_rules."
         )
-        eng_user = json.dumps({"pi_plan": pi}, ensure_ascii=False)
+        eng_user = json.dumps({"pi_plan": pi, "persona_notes": persona_notes}, ensure_ascii=False)
         eng = chat_json_cached(eng_system, eng_user, temperature=0.0)
         append_jsonl(session_log, {"role": "Engineer", "content": eng})
 
@@ -120,7 +146,7 @@ def run_planning_session(novelty: Dict[str, Any]) -> Dict[str, Any]:
             "You are the Reviewer. Validate the plan for clarity, risks, and minimality. "
             "Return the final plan JSON (same schema), making only necessary edits."
         )
-        rev_user = json.dumps({"engineer_plan": eng}, ensure_ascii=False)
+        rev_user = json.dumps({"engineer_plan": eng, "persona_notes": persona_notes}, ensure_ascii=False)
         rev = chat_json_cached(rev_system, rev_user, temperature=0.0)
         append_jsonl(session_log, {"role": "Reviewer", "content": rev})
 

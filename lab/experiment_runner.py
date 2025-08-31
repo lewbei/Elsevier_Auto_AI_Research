@@ -83,6 +83,14 @@ def _run_real(spec: Dict[str, Any]) -> Dict[str, Any]:
     except Exception:
         aug_callable = None
 
+    # Optional generated train hooks (advanced codegen)
+    gtrain = None
+    try:
+        import lab.generated_train as _gtrain  # type: ignore
+        gtrain = _gtrain
+    except Exception:
+        gtrain = None
+
     train_transforms = [
         transforms.Resize((input_size, input_size)),
         transforms.RandomHorizontalFlip(),
@@ -92,7 +100,17 @@ def _run_real(spec: Dict[str, Any]) -> Dict[str, Any]:
     if aug_callable is not None and bool(nc.get("enabled", False)):
         train_transforms.append(aug_callable)  # type: ignore[arg-type]
     train_transforms.append(transforms.ToTensor())
-    tfm_train = transforms.Compose(train_transforms)
+    # Allow advanced hook to override/extend train transforms
+    tfm_train = None
+    if gtrain is not None and hasattr(gtrain, "build_train_transforms"):
+        try:
+            tfm_candidate = gtrain.build_train_transforms(int(input_size))  # type: ignore[attr-defined]
+            if tfm_candidate is not None:
+                tfm_train = tfm_candidate
+        except Exception:
+            tfm_train = None
+    if tfm_train is None:
+        tfm_train = transforms.Compose(train_transforms)
     tfm_val = transforms.Compose([
         transforms.Resize((input_size, input_size)),
         transforms.ToTensor(),
@@ -286,6 +304,14 @@ def _run_real(spec: Dict[str, Any]) -> Dict[str, Any]:
             model.fc = nn.Linear(model.fc.in_features, int(num_classes))
     else:
         model.fc = nn.Linear(model.fc.in_features, int(num_classes))
+    # Advanced hook may override head entirely
+    if gtrain is not None and hasattr(gtrain, "build_model_head"):
+        try:
+            head = gtrain.build_model_head(int(model.fc.in_features), int(num_classes))  # type: ignore[attr-defined]
+            if head is not None:
+                model.fc = head
+        except Exception:
+            pass
     model.to(device)
 
     lr = float(spec.get("lr") or 1e-3)

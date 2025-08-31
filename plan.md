@@ -1,3 +1,77 @@
+Iterative Code Creation Integration (LLM-driven aug)
+
+Checklist (what I will do)
+
+- Inspect example folder + iterate flow
+- Add LLM-driven augmentation codegen helper
+- Wire config toggles and safe fallback
+- Compile sources and run pytest
+- Provide run instructions and rollback
+
+Plan
+
+- Introduce lab/codegen_llm.py with write_generated_aug_from_llm() that asks the LLM to output a tiny torchvision augmentation module (GeneratedAug) using a strict transform whitelist. Keep outputs minimal and safe.
+- Hook codegen into agents/iterate.py engineer_refine_specs() and per-iteration setup. Gate with YAML config pipeline.codegen.enable or env CODEGEN_ENABLE=1. Fall back to the existing deterministic write_generated_aug() when LLM is unavailable or returns invalid code.
+- Leave experiment runner unchanged except for its existing import of lab/generated_aug.py.
+
+Steps
+
+1) Add lab/codegen_llm.py (helper + safety checks + codeblock parsing)
+2) Update agents/iterate.py to call LLM codegen when enabled; fallback otherwise
+3) Document flags (CODEGEN_ENABLE and pipeline.codegen.enable) in AGENTS.md
+4) Compile repository and run pytest
+5) Validate iterate runs locally with CODEGEN_ENABLE=1
+
+Risks
+
+- Missing DEEPSEEK_API_KEY: codegen silently falls back to deterministic aug
+- LLM emits invalid code: helper validates shape, else fallback triggers
+- Excessive transforms: whitelist enforcement rejects risky code
+- Runtime import failures on Windows: existing sanity checks mitigate
+
+Rollback
+
+- Disable via CODEGEN_ENABLE=0 or pipeline.codegen.enable=false (YAML)
+- Remove lab/generated_aug.py to reset to default behavior
+- Revert agents/iterate.py imports/lines referencing lab.codegen_llm
+
+Advanced REPLACE/EDIT Editor (training hooks)
+
+Checklist (what I will do)
+
+- Add constrained REPLACE/EDIT loop to synthesize lab/generated_train.py
+- Integrate optional hooks into experiment runner
+- Gate behind YAML/env flags, with safe defaults
+- Compile and test
+
+Plan
+
+- Implement lab/code_edit_loop.py with run_codegen_editor():
+  Generates a tiny module defining build_train_transforms, build_model_head, update_spec,
+  using only torchvision transforms and torch.nn layers, with strict safety filters.
+- Update lab/experiment_runner.py to optionally import lab/generated_train and consume hooks:
+  transform override/extend; head override; spec tweaks kept minimal. All inside try/except.
+- Add flags: pipeline.codegen.editor.enable (YAML) and CODEGEN_EDITOR=1 (env).
+
+Steps
+
+1) Add lab/code_edit_loop.py (editor + safety + import checks)
+2) Integrate hook attempt in agents/iterate.py when enabled
+3) Update experiment_runner to consult generated_train hooks
+4) Document flags in AGENTS.md
+5) Compile and run pytest
+
+Risks
+
+- Missing DEEPSEEK_API_KEY: falls back silently
+- LLM produces invalid/unsafe code: rejected by safety checks, loop retries, then defaults
+- Hook import errors: guarded by try/except; experiment continues
+
+Rollback
+
+- Disable via CODEGEN_EDITOR=0 or pipeline.codegen.editor.enable=false
+- Remove lab/generated_train.py
+
  Paper Finder Progress Reporting (Windows + Git‑Bash)
 
 Checklist (what I will do)

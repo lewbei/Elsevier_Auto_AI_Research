@@ -8,6 +8,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dotenv import load_dotenv
 from utils.llm_utils import chat_json_cached, LLMError
 from lab.codegen_utils import write_generated_aug, write_generated_head
+from lab.codegen_llm import write_generated_aug_from_llm  # type: ignore
+from lab.code_edit_loop import run_codegen_editor  # type: ignore
 from lab.experiment_runner import run_experiment
 from lab.logging_utils import capture_env, try_mlflow_log
 from lab.report_html import write_dashboard
@@ -15,6 +17,10 @@ from lab.mutations import propose_mutations  # type: ignore
 from lab.plot_utils import maybe_save_accuracy_bar  # type: ignore
 from lab.config import get, get_bool
 from lab.config import dataset_path_for
+try:
+    from agents.personas import DialogueManager  # type: ignore
+except Exception:
+    DialogueManager = None  # type: ignore
 
 
 load_dotenv()
@@ -22,6 +28,7 @@ load_dotenv()
 RUNS_DIR = pathlib.Path("runs")
 EXPERIMENTS_DIR = pathlib.Path("experiments")
 NOVELTY_REPORT = pathlib.Path("data/novelty_report.json")
+PLAN_PATH = pathlib.Path("data/plan.json")
 
 
 def _ensure_dirs() -> None:
@@ -38,6 +45,32 @@ def _write_json(path: pathlib.Path, obj: Any) -> None:
     path.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _iter_persona_notes(context: Dict[str, Any]) -> List[str]:
+    """Return short persona notes for iterate guidance when enabled.
+
+    Controlled by pipeline.iterate.personas.enable or env ITERATE_PERSONAS=1.
+    """
+    try:
+        enable = get_bool("pipeline.iterate.personas.enable", False) or (
+            str(os.getenv("ITERATE_PERSONAS", "")).lower() in {"1", "true", "yes"}
+        )
+    except Exception:
+        enable = False
+    if not enable or DialogueManager is None:
+        return []
+    try:
+        dm = DialogueManager()
+        dm.post("User", "Provide 3 short bullets to guide hyperparameters and dataset choices.")
+        dm.post("User", f"Context: {json.dumps(context, ensure_ascii=False)}")
+        notes: List[str] = []
+        for role in ["PhD", "Professor", "SW", "ML"]:
+            r = dm.step_role(role, prompt="Be concrete and concise (<=3 bullets).")
+            notes.append(f"[{role}] {r.get('text','')}")
+        return notes
+    except Exception:
+        return []
+
+
 def propose_baseline_and_novelty(novelty: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
     topic = str(get("project.goal", "your task") or "your task")
     system = (
@@ -45,8 +78,19 @@ def propose_baseline_and_novelty(novelty: Dict[str, Any]) -> Tuple[Dict[str, Any
         "(1) a baseline using standard components, (2) a novelty variant incorporating a single, concrete novelty; "
         "and (3) an ablation that removes the novelty component from (2) only. Keep runnable on CPU in <= 1 epoch and small steps. Return JSON."
     )
+    # Optionally include plan.json and persona notes (multi‑persona integration)
+    plan_ctx = {}
+    try:
+        if PLAN_PATH.exists():
+            plan_ctx = json.loads(PLAN_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        plan_ctx = {}
+    persona_notes = _iter_persona_notes({"novelty_report": novelty, "plan": plan_ctx, "stage": "propose"})
+
     user_payload = {
         "novelty_report": novelty,
+        "plan": plan_ctx,
+        "persona_notes": persona_notes,
         "constraints": {
             "dataset": "ImageFolder under data/isic with train/ and val/",
             "compute": "CPU or single GPU, <= 1 epoch, limit steps",
@@ -227,6 +271,7 @@ def engineer_refine_specs(
             "max_train_steps": "<=1000",
             "safe_changes": ["lr", "max_train_steps", "input_size", "novelty_component.enabled"],
         },
+        "persona_notes": _iter_persona_notes({"prior": compact, "stage": "refine"}),
         "output_schema": {
             "baseline": {},
             "novelty": {},
@@ -248,10 +293,35 @@ def engineer_refine_specs(
     n_nc = n.get("novelty_component", {})
     n["novelty_component"] = {"description": n_nc.get("description", "novelty"), "enabled": True}
     # Minimal codegen: write a generated augmentation module based on novelty description
+    # Prefer LLM-driven generation when enabled; fall back to template mapping otherwise.
     try:
-        write_generated_aug(n["novelty_component"]["description"])  # writes lab/generated_aug.py
+        use_llm_codegen = (
+            get_bool("pipeline.codegen.enable", False)
+            or (str(os.getenv("CODEGEN_ENABLE", "")).lower() in {"1", "true", "yes"})
+        )
     except Exception:
-        pass
+        use_llm_codegen = False
+    if use_llm_codegen:
+        try:
+            ctx = json.dumps({
+                "baseline": b.get("title", "baseline"),
+                "novelty": n.get("title", "novelty"),
+                "ablation": a.get("title", "ablation"),
+                "persona_notes": _iter_persona_notes({"stage": "codegen", "novelty": n.get("novelty_component", {})}),
+            }, ensure_ascii=False)
+            wrote = write_generated_aug_from_llm(n["novelty_component"]["description"], extra_context=ctx)
+            if wrote is None:
+                write_generated_aug(n["novelty_component"]["description"])
+        except Exception:
+            try:
+                write_generated_aug(n["novelty_component"]["description"])  # writes lab/generated_aug.py
+            except Exception:
+                pass
+    else:
+        try:
+            write_generated_aug(n["novelty_component"]["description"])  # writes lab/generated_aug.py
+        except Exception:
+            pass
     return b, n, a
 
 
@@ -305,13 +375,41 @@ def iterate(novelty: Dict[str, Any], max_iters: int = 2) -> None:
         # Ensure generated modules exist for this iteration (safe defaults)
         try:
             desc = (novelty_spec.get("novelty_component", {}) or {}).get("description", "")
-            write_generated_aug(desc or "jitter rotate")
+            # When LLM codegen is enabled, attempt to regenerate the aug module with richer context.
+            use_llm_codegen = (
+                get_bool("pipeline.codegen.enable", False)
+                or (str(os.getenv("CODEGEN_ENABLE", "")).lower() in {"1", "true", "yes"})
+            )
+            if use_llm_codegen:
+                ctx = json.dumps({"iter": it, "run_id": run_id, "spec": novelty_spec}, ensure_ascii=False)
+                wrote = write_generated_aug_from_llm(str(desc or "jitter rotate"), extra_context=ctx)
+                if wrote is None:
+                    write_generated_aug(desc or "jitter rotate")
+            else:
+                write_generated_aug(desc or "jitter rotate")
         except Exception:
             pass
         try:
             write_generated_head()
         except Exception:
             pass
+
+        # Optional advanced code editor to produce training hooks module
+        try:
+            use_editor = (
+                get_bool("pipeline.codegen.editor.enable", False)
+                or (str(os.getenv("CODEGEN_EDITOR", "")).lower() in {"1", "true", "yes"})
+            )
+        except Exception:
+            use_editor = False
+        if use_editor:
+            try:
+                ctx = json.dumps({"iter": it, "run_id": run_id, "spec": novelty_spec}, ensure_ascii=False)
+                ok = run_codegen_editor(description=str(desc or ""), extra_context=ctx, max_steps=2)
+                if not ok:
+                    print("[CODEGEN] Editor failed; continuing with defaults.")
+            except Exception as _exc:
+                print(f"[CODEGEN] Editor exception: {_exc}")
 
         # Breadth: base triplet plus a second model variant for each
         base_triplet = [("baseline", baseline), ("novelty", novelty_spec), ("ablation", ablation)]
@@ -399,6 +497,18 @@ def iterate(novelty: Dict[str, Any], max_iters: int = 2) -> None:
         decision = analyze_and_decide(iter_results, target_delta=0.005)
         _write_json(RUNS_DIR / run_id / "decision.json", decision)
         print(f"[DECISION] {decision}")
+        # Optional reviewer stage
+        try:
+            enable_reviewer = get_bool("pipeline.reviewer.enable", False) or (str(os.getenv("REVIEWER_ENABLE", "")).lower() in {"1", "true", "yes"})
+        except Exception:
+            enable_reviewer = False
+        if enable_reviewer:
+            try:
+                review = _review_iteration(iter_results, decision, novelty_spec)
+                _write_json(RUNS_DIR / run_id / "review.json", review)
+                print(f"[REVIEW] {review.get('recommendation', 'n/a')}: {review.get('summary','')}")
+            except Exception as _exc:
+                print(f"[REVIEW] failed: {_exc}")
         if decision.get("success"):
             goal_reached = True
             break
@@ -513,6 +623,50 @@ def aggregate_repeats(runs: List[Dict[str, Any]]) -> Dict[str, Dict[str, float]]
         std = math.sqrt(var)
         out[k] = {"mean": mean, "std": std, "n": n}
     return out
+
+
+def _review_iteration(results: List[Dict[str, Any]], decision: Dict[str, Any], novelty_spec: Dict[str, Any]) -> Dict[str, Any]:
+    """LLM reviewer: compare novelty vs baseline/ablation and recommend proceed/stop."""
+    system = (
+        "You are a peer reviewer. Given experiment results (names, specs, metrics) and a decision heuristic, "
+        "write a short summary, rate novelty performance, and recommend 'proceed' or 'stop'. Return JSON."
+    )
+    compact = []
+    for r in results:
+        compact.append({
+            "name": r.get("name"),
+            "metrics": r.get("result", {}).get("metrics", {}),
+            "spec": {k: r.get("spec", {}).get(k) for k in ["lr", "max_train_steps", "input_size", "model", "novelty_component"]},
+        })
+    user_payload = {
+        "results": compact,
+        "heuristic": decision,
+        "novelty": novelty_spec.get("novelty_component", {}),
+        "output_schema": {
+            "summary": "string",
+            "novelty_vs_baseline": "number",
+            "novelty_vs_ablation": "number",
+            "recommendation": "proceed|stop",
+            "notes": ["string"],
+        },
+    }
+    try:
+        js = chat_json_cached(system, json.dumps(user_payload, ensure_ascii=False), temperature=0.0)
+    except LLMError as exc:
+        return {
+            "summary": f"LLM error: {exc}",
+            "novelty_vs_baseline": 0.0,
+            "novelty_vs_ablation": 0.0,
+            "recommendation": "proceed" if decision.get("success") else "stop",
+            "notes": [],
+        }
+    return {
+        "summary": str(js.get("summary") or ""),
+        "novelty_vs_baseline": float(js.get("novelty_vs_baseline") or 0.0),
+        "novelty_vs_ablation": float(js.get("novelty_vs_ablation") or 0.0),
+        "recommendation": str(js.get("recommendation") or ("proceed" if decision.get("success") else "stop")),
+        "notes": js.get("notes") or [],
+    }
 
 
 if __name__ == "__main__":
