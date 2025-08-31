@@ -7,10 +7,12 @@ from typing import Any, Dict
 
 
 def ensure_dir(p: Path) -> None:
+    """Create directory and parent directories if they don't exist."""
     p.mkdir(parents=True, exist_ok=True)
 
 
 def capture_env() -> Dict[str, Any]:
+    """Capture current environment info including Python version, platform, and installed packages."""
     info: Dict[str, Any] = {
         "python": sys.version.replace("\n", " "),
         "platform": platform.platform(),
@@ -50,11 +52,13 @@ def capture_env() -> Dict[str, Any]:
 
 
 def write_json(path: Path, obj: Any) -> None:
+    """Write object as JSON to file, creating parent directories as needed."""
     ensure_dir(path.parent)
     path.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def append_jsonl(path: Path, obj: Any) -> None:
+    """Append object as JSON line to file, creating parent directories as needed."""
     ensure_dir(path.parent)
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(obj, ensure_ascii=False))

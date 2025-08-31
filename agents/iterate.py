@@ -168,10 +168,10 @@ def verify_and_fix_spec(spec: Dict[str, Any]) -> Dict[str, Any]:
     fixed = dict(spec)
     fixed.setdefault("dataset_path", dataset_path_for())
     # ranges
-    def clamp(v, lo, hi, cast):
+    def clamp(v, lo, hi, cast) -> Any:
         try:
             return max(lo, min(hi, cast(v)))
-        except Exception:
+        except (ValueError, TypeError):
             return lo
     fixed["input_size"] = clamp(fixed.get("input_size", 224), 96, 512, int)
     fixed["epochs"] = clamp(fixed.get("epochs", 1), 1, 5, int)
