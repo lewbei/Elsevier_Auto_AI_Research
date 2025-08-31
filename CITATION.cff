@@ -1,0 +1,22 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: "Elsevier Auto AI Research"
+abstract: "An end-to-end automated AI research pipeline that discovers, analyzes, and conducts machine learning research using LLMs and academic APIs"
+authors:
+  - family-names: "lewbei"
+    given-names: ""
+repository-code: "https://github.com/lewbei/Elsevier_Auto_AI_Research"
+url: "https://github.com/lewbei/Elsevier_Auto_AI_Research"
+license: MIT
+keywords:
+  - artificial-intelligence
+  - machine-learning
+  - research-automation
+  - academic-research
+  - llm
+  - elsevier
+  - automated-experimentation
+  - paper-generation
+version: "1.0.0"
+date-released: "2024-08-31"
