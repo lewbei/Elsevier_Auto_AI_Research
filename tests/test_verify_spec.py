@@ -1,4 +1,4 @@
-from agents_iterate import verify_and_fix_spec
+from agents.iterate import verify_and_fix_spec
 
 
 def test_verify_and_fix_spec_ranges():
@@ -22,4 +22,3 @@ def test_verify_and_fix_spec_ranges():
     assert fixed["model"] == "resnet18"
     assert isinstance(fixed["novelty_component"], dict)
     assert "enabled" in fixed["novelty_component"]
-

@@ -31,7 +31,7 @@
 - Stage orchestration: Add a minimal 2–3 stage manager around our iterate loop with clear goals and stop rules.
 - Light beam search: At each refine step, propose K small spec mutations and select the best; reuse our `verify_and_fix_spec` to guard.
 - Journaling: Persist per‑stage JSONL with best runs and decisions; we already write summary/best_config.
-- LLM shim: Adopt limited quirks handling from `llm.py` into `llm_utils.py` (e.g., token params) behind an environment flag.
+- LLM shim: Adopt limited quirks handling from `llm.py` into `utils/llm_utils.py` (e.g., token params) behind an environment flag.
 - VLM slot: Add an optional VLM review hook with a clear on/off flag to keep headless safe.
 
 ## Concrete Action Items
@@ -41,10 +41,31 @@
 2. **Beam mutations:**
    - New: `lab/mutations.py` proposes 2–3 adjacent tweaks (lr, steps, input_size, optimizer) with verify; feed into matrix.
 3. **LLM client quirks:**
-   - Extend `llm_utils.chat_json` to optionally map `max_tokens`/`max_completion_tokens` and ignore unsupported temperature for specified models.
+   - Extend `utils.llm_utils.chat_json` to optionally map `max_tokens`/`max_completion_tokens` and ignore unsupported temperature for specified models.
 4. **Optional VLM feedback hook:**
    - New: `vlm_utils.py` interface; analysis of saved `runs/accuracy.png` only if `VLM_ENABLED`.
 
 ## Validation
 - Keep additive and env‑gated; rely on pytest only. No GPU assumptions.
+
+---
+# Project Structure
+
+- agents/: Packaged steps (novelty, planner, iterate, write_paper).
+- agents/paper_finder.py: Downloader + relevance filter (Elsevier + DeepSeek).
+- lab/: Shared library utilities used across agents.
+  - config.py: YAML-first configuration loader.
+  - experiment_runner.py: Minimal train/val/test runner with PyTorch.
+  - codegen_utils.py: Safe, tiny codegen for aug/head modules.
+  - logging_utils.py, report_html.py, plot_utils.py, mutations.py, prompt_overrides.py.
+- data/: Pipeline artifacts and derived JSON.
+- paper/: Draft outputs (Markdown + LaTeX).
+- tests/: Unit tests.
+- config.yaml: Domain-agnostic settings (goal, dataset, research outline sizes).
+
+Conventions
+
+- Prompts are domain-agnostic; only `project.goal` shapes intent.
+- Dataset supports imagefolder, CIFAR10, or custom loaders; train/val/test are explicit.
+- Evaluation reports highlight test metrics; selection remains on validation.
 

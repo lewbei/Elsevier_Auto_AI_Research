@@ -48,9 +48,20 @@ def main() -> None:
     (HERE / "data").mkdir(exist_ok=True)
     (HERE / "downloads").mkdir(exist_ok=True)
     (HERE / "logs").mkdir(exist_ok=True)
+    pdf_dir = HERE / "pdfs"
+    try:
+        pdf_count = sum(1 for p in pdf_dir.glob("*.pdf")) if pdf_dir.exists() else 0
+    except Exception:
+        pdf_count = 0
 
     # 1) Find + download papers (cap 40 kept, dedupe seeded from CSV)
-    run_step(py, ["paper_finder.py"])  # call the script explicitly
+    skip_find = str(os.getenv("SKIP_FIND_PAPERS", "")).lower() in {"1", "true", "yes"}
+    auto_skip = pdf_count >= 40
+    if skip_find or auto_skip:
+        reason = "env SKIP_FIND_PAPERS" if skip_find else f"found {pdf_count} PDFs under pdfs/"
+        print(f"[SKIP] Step 1 (paper_finder) skipped ({reason}).")
+    else:
+        run_step(py, ["-m", "agents.paper_finder"])  # packaged agent
 
     # 2) Summaries + novelty synthesis
     run_step(py, ["-m", "agents.novelty"])  # packaged agent

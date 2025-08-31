@@ -4,8 +4,8 @@ import pathlib
 from typing import Dict, Any, List
 from dotenv import load_dotenv
 
-from pdf_utils import extract_text_from_pdf
-from llm_utils import chat_json, LLMError
+from utils.pdf_utils import extract_text_from_pdf
+from utils.llm_utils import chat_json, LLMError
 from lab.config import get
 
 
@@ -299,4 +299,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

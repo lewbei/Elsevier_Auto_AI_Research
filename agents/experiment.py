@@ -3,7 +3,7 @@ import pathlib
 from typing import Any, Dict
 
 from dotenv import load_dotenv
-from llm_utils import chat_json, LLMError
+from utils.llm_utils import chat_json, LLMError
 from lab.experiment_runner import run_experiment
 from lab.config import dataset_path_for, get
 
@@ -113,4 +113,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

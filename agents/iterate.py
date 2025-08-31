@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from dotenv import load_dotenv
-from llm_utils import chat_json_cached, LLMError
+from utils.llm_utils import chat_json_cached, LLMError
 from lab.codegen_utils import write_generated_aug, write_generated_head
 from lab.experiment_runner import run_experiment
 from lab.logging_utils import capture_env, try_mlflow_log
@@ -505,4 +505,3 @@ def aggregate_repeats(runs: List[Dict[str, Any]]) -> Dict[str, Dict[str, float]]
 
 if __name__ == "__main__":
     main()
-

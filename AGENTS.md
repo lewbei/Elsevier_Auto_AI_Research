@@ -70,7 +70,9 @@ Pipeline Runbook (step‑by‑step)
 
 1) Find and download papers (Elsevier + DeepSeek relevance)
    - Pre‑req: set ELSEVIER_KEY and DEEPSEEK_API_KEY in .env
-   - cmd.exe /C "python paper_finder.py"
+   - cmd.exe /C "python -m agents.paper_finder"
+   - Auto-skip when running run_pipeline: if `pdfs/` already contains 40+ PDFs, Step 1 is skipped automatically.
+   - Optional manual skip: cmd.exe /C "set SKIP_FIND_PAPERS=1&& python run_pipeline.py"
    - Outputs: abstract_screen_deepseek.csv and pdfs/*.pdf
    - If you prefer to skip this and use your own PDFs, just place them under pdfs/ and move on.
 
@@ -95,7 +97,7 @@ Pipeline Runbook (step‑by‑step)
 One‑shot pipeline
 
 - Run everything (4 steps; paper drafting only if WRITE_PAPER=1):
-  - cmd.exe /C "python run_pipeline.py"
+  - cmd.exe /C "python run_pipeline.py"  (auto-skips Step 1 if 40+ PDFs present)
 
 Validation and Artifacts
 

@@ -1,7 +1,7 @@
 # Project Structure
 
-- agents_*.py: Thin scripts driving each stage (novelty, planner, iterate, write_paper).
-- paper_finder: Downloader + relevance filter (Elsevier + DeepSeek).
+- agents/: Packaged steps (novelty, planner, iterate, write_paper).
+- agents/paper_finder.py: Downloader + relevance filter (Elsevier + DeepSeek).
 - lab/: Shared library utilities used across agents.
   - config.py: YAML-first configuration loader.
   - experiment_runner.py: Minimal train/val/test runner with PyTorch.
@@ -17,4 +17,3 @@ Conventions
 - Prompts are domain-agnostic; only `project.goal` shapes intent.
 - Dataset supports imagefolder, CIFAR10, or custom loaders; train/val/test are explicit.
 - Evaluation reports highlight test metrics; selection remains on validation.
-

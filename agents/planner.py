@@ -4,7 +4,7 @@ from typing import Any, Dict
 import os
 
 from dotenv import load_dotenv
-from llm_utils import chat_json_cached, LLMError
+from utils.llm_utils import chat_json_cached, LLMError
 from lab.logging_utils import append_jsonl
 from lab.prompt_overrides import load_prompt
 from lab.config import dataset_name, dataset_path_for, get
@@ -174,4 +174,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

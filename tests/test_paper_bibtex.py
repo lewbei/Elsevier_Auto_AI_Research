@@ -1,5 +1,5 @@
 from pathlib import Path
-from agents_write_paper import build_bibtex_from_csv
+from agents.write_paper import build_bibtex_from_csv
 
 
 def test_build_bibtex_from_csv(tmp_path: Path):
@@ -16,4 +16,3 @@ def test_build_bibtex_from_csv(tmp_path: Path):
     assert "@article{" in content
     assert "10.1234/a" in content
     assert "2024" in content
-

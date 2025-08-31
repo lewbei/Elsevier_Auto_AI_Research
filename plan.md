@@ -1,38 +1,36 @@
- Data Leakage Review Plan
+ Repository Restructure Roadmap
 
-Checklist
+Checklist (what I will do)
 
-- Map repo structure and key entry points
-- Inspect dataset loading and splits
-- Review training/validation loops and metrics
-- Check augmentation application by split
-- Review caching, logging, and secrets handling
-- Summarize risks and concrete mitigations
+- Decide target locations for top‑level modules
+- Move files with minimal import churn
+- Add wrappers to preserve existing test imports
+- Update run commands and docs consistently
+- Compile sources and run pytest to verify
+- Provide rollback and migration notes
 
 Plan
 
-- Analyze ML experiment code for train/val/test separation and any cross‑contamination.
-- Examine selection/reporting logic for validation overfitting risk.
-- Review fallback/synthetic data usage for inadvertent coupling.
-- Audit LLM and HTTP utilities for secret or content leakage.
+- Consolidate utilities into a `utils/` package and move `llm_utils.py` and `pdf_utils.py` there.
+- Move `paper_finder.py` into `agents/` so all pipeline entry points live under one package.
+- Update imports across `agents/*` and add thin top‑level wrappers (`agents_iterate.py`, `agents_write_paper.py`) to keep tests stable.
+- Update `run_pipeline.py` and `AGENTS.md` to call `python -m agents.paper_finder` instead of the previous top‑level script.
 
 Steps
 
-1) Inventory files
-2) Read lab/experiment_runner.py and agents_iterate.py
-3) Read lab/codegen_utils.py and generated_aug usage
-4) Scan tests for assumptions about datasets and selection
-5) Inspect llm_utils.py, paper_finder, logging/reporting
-6) Produce findings and recommended fixes
+1) Create `utils/` package and move `llm_utils.py`/`pdf_utils.py`.
+2) Move `paper_finder.py` to `agents/paper_finder.py`.
+3) Fix imports in `agents/*` and docs; add top‑level wrappers for tests.
+4) Update `run_pipeline.py` and `AGENTS.md` commands.
+5) Compile all sources and run pytest.
 
 Risks
 
-- CIFAR10 path may be using the test split as validation (selection on test).
-- Repeated runs may reuse identical seeds (lack of independence, not leakage).
-- FakeData fallback could create overly similar train/val distributions.
-- Potential accidental logging of sensitive env values (unlikely but checked).
+- Import path regressions if any reference still points to old locations.
+- Pipeline docs drift if commands are not updated consistently.
+- Hidden references in notebooks or scripts not covered by tests.
 
 Rollback
 
-- This is a read‑only audit; no code changes required. If fixes are desired, implement behind env flags (e.g., EVAL_ON_TEST, VAL_FRACTION) to keep defaults stable.
-
+- Keep thin compatibility wrappers at the repo root so external users importing legacy names continue working.
+- If needed, revert moves by restoring files to the top level and removing new package paths.
