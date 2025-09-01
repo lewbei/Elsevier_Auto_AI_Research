@@ -4,9 +4,11 @@ import pathlib
 from typing import Dict, Any, List
 from dotenv import load_dotenv
 
-from utils.llm_utils import chat_json, LLMError
+from utils.llm_utils import chat_json, LLMError, LLM_PROVIDER, LLM_MODEL
 from lab.config import get, get as get_cfg, get as _get
 from lab.logging_utils import is_verbose, vprint, append_jsonl
+from lab.novelty_facets import extract_facets
+from lab.novelty_scoring import score_and_filter_ideas
 
 try:
     # Optional: multi‑persona discussion helpers
@@ -151,6 +153,127 @@ def group_novelty_and_ideas(summaries: List[Dict[str, Any]], persona_notes: List
                 "eval_plan": [str(x) for x in (item.get("eval_plan") or []) if str(x).strip()],
                 "compute_budget": str(item.get("compute_budget") or "").strip(),
             })
+    return {"themes": themes, "new_ideas": new_ideas, "new_ideas_detailed": fixed_di}
+
+
+def group_novelty_and_ideas_v2(
+    summaries: List[Dict[str, Any]],
+    persona_notes: List[str] | None = None,
+    facets: Dict[str, List[str]] | None = None,
+) -> Dict[str, Any]:
+    # Build compact input from summaries
+    items: List[Dict[str, Any]] = []
+    for s in summaries:
+        items.append({
+            "title": str(s.get("title") or "")[:120],
+            "novelty_claims": s.get("novelty_claims") or [],
+            "methods": s.get("methods") or [],
+            "limitations": s.get("limitations") or [],
+        })
+
+    goal = str(get("project.goal", "your goal") or "your goal")
+    facet_block = json.dumps(facets or {}, ensure_ascii=False)
+    system = (
+        "You are a meticulous panel moderator coordinating multiple expert personas to synthesize novelty across papers.\n"
+        "STRICT GROUNDING:\n"
+        "- Use ONLY backbones/operators/datasets that appear in facets.backbones/ops/datasets. Do not invent generic backbones.\n"
+        "- Every idea MUST include: derived_from_titles (>=2), delta_vs_prior (<=240 chars citing those titles), AND >=3 numeric spec tokens (e.g., img_size=640, lr=3e-4, iou_thresh=0.6).\n"
+        "- Avoid generic augmentation-only or hparam-only tweaks unless justified as non-trivial.\n"
+        "- If detection/YOLO, include yolo_version, backbone, img_size, anchors, conf_thresh, iou_thresh, nms, task_adapt in method/spec_hint.\n"
+        "Tasks: (a) robustly CLUSTER into 3–6 THEMES; (b) write a compact SUMMARY per theme with divergences/caveats and 2–4 representative paper titles; (c) propose 5–8 NEW RESEARCH IDEAS.\n"
+        "Return strictly JSON and self-validate against the output_schema."
+    )
+
+    user_payload = {
+        "papers": items,
+        "persona_notes": list(persona_notes or []),
+        "facets": json.loads(facet_block),
+        "output_schema": {
+            "themes": [{"name": "string", "summary": "string", "representative_papers": ["string"]}],
+            "new_ideas": ["string"],
+            "new_ideas_detailed": [
+                {
+                    "id": "string",
+                    "title": "string",
+                    "novelty_kind": "string",
+                    "why_novel": "string",
+                    "spec_hint": "string",
+                    "method": "string",
+                    "risks": "string",
+                    "eval_plan": ["string"],
+                    "compute_budget": "string",
+                    "derived_from_titles": ["string"],
+                    "delta_vs_prior": "string",
+                }
+            ],
+        },
+    }
+
+    model = get("pipeline.novelty.model", None)
+    profile = get("pipeline.novelty.llm", None)
+
+    # diversify a bit, then merge (but do not multi-sample for GPT-5)
+    temps = get("pipeline.novelty.sampling.temperatures", [0.2]) or [0.2]
+    if isinstance(temps, str):
+        try:
+            temps = [float(t) for t in str(temps).split(",") if t.strip()]
+        except Exception:
+            temps = [0.2]
+    try:
+        provider = str(get("llm.provider", LLM_PROVIDER) or LLM_PROVIDER).lower()
+        sel_model = str((model or get("llm.model", LLM_MODEL) or LLM_MODEL)).lower()
+        if provider == "openai" and (sel_model.startswith("gpt-5-") or sel_model == "gpt-5"):
+            temps = [0.0]
+    except Exception:
+        pass
+    candidates: List[Dict[str, Any]] = []
+    themes_agg: List[Dict[str, Any]] = []
+    # Allow a longer request timeout via YAML/env; default to 180s for robustness
+    try:
+        _req_timeout = int(get("pipeline.novelty.request_timeout", 180) or 180)
+    except Exception:
+        _req_timeout = 180
+    for tval in temps:
+        js = chat_json(
+            system,
+            json.dumps(user_payload, ensure_ascii=False),
+            temperature=float(tval),
+            model=model,
+            profile=profile,
+            timeout=_req_timeout,
+        )
+        th = js.get("themes") or []
+        di = js.get("new_ideas_detailed") or []
+        if isinstance(th, list):
+            themes_agg.extend([x for x in th if isinstance(x, dict)])
+        if isinstance(di, list):
+            candidates.extend([x for x in di if isinstance(x, dict)])
+
+    # light shape enforcement + dedupe
+    fixed_di: List[Dict[str, Any]] = []
+    seen = set()
+    for idx, item in enumerate(candidates, start=1):
+        dft = {
+            "id": str(item.get("id") or idx),
+            "title": str(item.get("title") or "").strip(),
+            "novelty_kind": str(item.get("novelty_kind") or "").strip(),
+            "why_novel": str(item.get("why_novel") or "").strip(),
+            "spec_hint": str(item.get("spec_hint") or "").strip(),
+            "method": str(item.get("method") or "").strip(),
+            "risks": str(item.get("risks") or "").strip(),
+            "eval_plan": [str(x) for x in (item.get("eval_plan") or []) if str(x).strip()],
+            "compute_budget": str(item.get("compute_budget") or "").strip(),
+            "derived_from_titles": [str(x).strip() for x in (item.get("derived_from_titles") or []) if str(x).strip()],
+            "delta_vs_prior": str(item.get("delta_vs_prior") or "").strip(),
+        }
+        key = (dft["title"].lower(), dft["delta_vs_prior"].lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        fixed_di.append(dft)
+
+    themes = [t for t in themes_agg if isinstance(t, dict)]
+    new_ideas = [it.get("title", "") for it in fixed_di]
     return {"themes": themes, "new_ideas": new_ideas, "new_ideas_detailed": fixed_di}
 
 
@@ -345,14 +468,14 @@ def _persona_discussion(summaries: List[Dict[str, Any]]) -> List[str]:
                 except Exception:
                     return order[index] if 0 <= index < len(order) else ""
 
-            # Proposals from proposers
+            # Proposals from proposers (force citations + deltas)
             for p_idx, role in enumerate(proposers):
                 prompt = (
-                    f"From the perspective of {_alias_at(p_idx)}, propose 2 concrete NOVELTY directions grounded in the provided papers (NOT process or training logistics). "
-                    "Each proposal must specify: NOVELTY_KIND:[architecture|training_objective|data|evaluation|augmentation|optimizer]; "
-                    "COMPONENT_CHANGE:<one-sentence change at component level>; WHY_NOVEL:<why this is novel vs common baselines>; "
-                    "SPEC_HINT:<minimal spec/code change to validate>. "
-                    "Prefix each with 'PROPOSAL_NOVELTY:'. Constraints: <=1 epoch, small steps, feasible on CPU. Ask no questions yet."
+                    f"From the perspective of {_alias_at(p_idx)}, propose 2 concrete NOVELTY directions grounded in the provided papers.\n"
+                    "Each must include:\n"
+                    "TITLES:[t1,t2], DELTA_VS_PRIOR:<one sentence referencing t1/t2>, SPEC_HINT:<numbers>, RISK:<one line>.\n"
+                    "Use ONLY backbones from facets.backbones. If detection, include yolo_version, iou_thresh, nms.\n"
+                    "Prefix each with 'PROPOSAL_NOVELTY:'."
                 )
                 r = dm.step_role(role, prompt=prompt)
                 alias = _alias_at(p_idx)
@@ -404,9 +527,8 @@ def _persona_discussion(summaries: List[Dict[str, Any]]) -> List[str]:
                 # Cross-examination: each role asks questions
                 for idx, role in enumerate(order):
                     prompt = (
-                        f"From the perspective of {_alias_at(idx)}, ask 2 critical questions about the NOVELTY itself: originality vs prior work, overlap with common baselines, "
-                        "risk of being only an augmentation/hparam tweak, and what ablation isolates the novelty effect. "
-                        "Prefer questions that strengthen or falsify the novelty. Prefix each with 'QUESTION_NOVELTY:'. Do not propose new ideas in this step."
+                        f"From the perspective of {_alias_at(idx)}, ask 2 critical QUESTIONS about NOVELTY.\n"
+                        "Each QUESTION_NOVELTY must cite one of the TITLES and challenge originality vs that prior or the delta isolation."
                     )
                     r = dm.step_role(role, prompt=prompt)
                     alias = _alias_at(idx)
@@ -421,8 +543,8 @@ def _persona_discussion(summaries: List[Dict[str, Any]]) -> List[str]:
                 # Short answers: each role answers at least one outstanding question
                 for idx, role in enumerate(order):
                     prompt = (
-                        f"From the perspective of {_alias_at(idx)}, answer one outstanding QUESTION_NOVELTY concisely. "
-                        "Prefix with 'ANSWER_NOVELTY:'. If none apply, clarify one assumption that strengthens novelty."
+                        f"From the perspective of {_alias_at(idx)}, answer one QUESTION_NOVELTY concisely.\n"
+                        "Prefix with 'ANSWER_NOVELTY:'. Reference the DELTA_VS_PRIOR and give one falsifying ablation with numeric spec."
                     )
                     r = dm.step_role(role, prompt=prompt)
                     alias = _alias_at(idx)
@@ -470,6 +592,22 @@ def _persona_discussion(summaries: List[Dict[str, Any]]) -> List[str]:
                             pass
                     if "agree_novelty:" in txt.lower() and "yes" in txt.lower():
                         agrees += 1
+                # Record consensus outcome (best-effort visibility in logs/transcript)
+                try:
+                    append_jsonl(NOVELTY_SESSION, {
+                        "role": "system",
+                        "phase": "consensus_result",
+                        "yes_votes": int(agrees),
+                        "total": int(len(order)),
+                        "agreed": bool(agrees >= len(order)),
+                    })
+                except Exception:
+                    pass
+                # Also add a concise note line
+                try:
+                    notes.append(f"[Consensus] yes={agrees}/{len(order)} agreed={agrees >= len(order)}")
+                except Exception:
+                    pass
                 if agrees >= len(order):
                     agreed = True
 
@@ -583,8 +721,25 @@ def _uniqueness_reflection(panel: Dict[str, Any], persona_notes: List[str] | Non
     return {"unique_ideas": u, "critique": c}
 
 
+    
+
+
 def main() -> None:
     _ensure_dirs()
+    # Progress printing control (default ON unless explicitly disabled)
+    try:
+        _progress = True
+        try:
+            _progress = bool(get("pipeline.novelty.print_progress", True))
+        except Exception:
+            _progress = True
+        envp = str(os.getenv("NOVELTY_PROGRESS", "")).lower()
+        if envp in {"0", "false", "no", "off"}:
+            _progress = False
+        elif envp in {"1", "true", "yes", "on"}:
+            _progress = True
+    except Exception:
+        _progress = True
     # Load existing summaries from disk
     if not SUM_DIR.exists():
         print(f"[ERR] Missing summaries dir: {SUM_DIR}. Run agents.summarize first.")
@@ -601,15 +756,93 @@ def main() -> None:
                 summaries.append(rec)
         except Exception:
             continue
+    if _progress:
+        try:
+            print(f"[NOVELTY] Loaded {len(summaries)} summaries from {SUM_DIR}")
+        except Exception:
+            pass
 
     # Optional persona discussion to inform clustering
     persona_notes: List[str] = _persona_discussion([s["summary"] for s in summaries])
+    if _progress:
+        try:
+            print(f"[NOVELTY] Persona notes recorded: {len(persona_notes)}")
+        except Exception:
+            pass
+
+    # Build facets from your summaries and persist for audit
+    facets = extract_facets([s["summary"] for s in summaries], persist=True)
+    if _progress:
+        try:
+            print(
+                "[NOVELTY] Mined facets: backbones=%d, datasets=%d, ops=%d"
+                % (
+                    len(facets.get("backbones", [])),
+                    len(facets.get("datasets", [])),
+                    len(facets.get("ops", [])),
+                )
+            )
+        except Exception:
+            pass
+
+    # Temperature sampling info (suppress temps for GPT-5)
+    try:
+        _temps = get("pipeline.novelty.sampling.temperatures", [0.2]) or [0.2]
+        if isinstance(_temps, str):
+            _temps = [float(t) for t in str(_temps).split(",") if t.strip()]
+    except Exception:
+        _temps = [0.2]
+    try:
+        _prov = str(get("llm.provider", LLM_PROVIDER) or LLM_PROVIDER).lower()
+        _mod = str((get("pipeline.novelty.model", None) or get("llm.model", LLM_MODEL) or LLM_MODEL)).lower()
+        if _prov == "openai" and (_mod.startswith("gpt-5-") or _mod == "gpt-5"):
+            _temps = [0.0]
+            if _progress:
+                try:
+                    print("[NOVELTY] Synthesizing themes/ideas (GPT-5: no temperature)")
+                except Exception:
+                    pass
+        else:
+            if _progress:
+                try:
+                    print(f"[NOVELTY] Synthesizing themes/ideas (temps={_temps})")
+                except Exception:
+                    pass
+    except Exception:
+        if _progress:
+            try:
+                print(f"[NOVELTY] Synthesizing themes/ideas (temps={_temps})")
+            except Exception:
+                pass
 
     try:
-        panel = group_novelty_and_ideas([s["summary"] for s in summaries], persona_notes=persona_notes)
+        panel = group_novelty_and_ideas_v2([s["summary"] for s in summaries], persona_notes=persona_notes, facets=facets)
     except LLMError as exc:
         print(f"[ERR] LLM group discussion failed: {exc}")
-        panel = {"themes": [], "new_ideas": []}
+        panel = {"themes": [], "new_ideas": [], "new_ideas_detailed": []}
+    if _progress:
+        try:
+            print(
+                "[NOVELTY] Synthesized: themes=%d, ideas_detailed=%d"
+                % (len(panel.get("themes") or []), len(panel.get("new_ideas_detailed") or []))
+            )
+        except Exception:
+            pass
+
+    # Gate bad ideas
+    try:
+        _before = len(panel.get("new_ideas_detailed") or [])
+        panel = score_and_filter_ideas(panel, facets)
+        _after = len(panel.get("new_ideas_detailed") or [])
+        if _progress:
+            try:
+                print(f"[NOVELTY] Ideas kept after scoring: {_after}/{_before}")
+                if _after == 0:
+                    print("[NOVELTY] No ideas remain after scoring (no fallback enabled)")
+            except Exception:
+                pass
+    except Exception:
+        pass
 
     # Research outline and citations
     try:
@@ -618,9 +851,27 @@ def main() -> None:
     except LLMError as exc:
         print(f"[WARN] LLM research outline failed: {exc}")
         outline = {"problems": [], "objectives": [], "contributions": [], "research_questions": [], "citations": []}
+    if _progress:
+        try:
+            print(
+                "[NOVELTY] Outline: problems=%d, objectives=%d, contributions=%d, questions=%d"
+                % (
+                    len(outline.get("problems") or []),
+                    len(outline.get("objectives") or []),
+                    len(outline.get("contributions") or []),
+                    len(outline.get("research_questions") or []),
+                )
+            )
+        except Exception:
+            pass
 
     # Optional uniqueness reflection (novelty differentiation)
     uniq = _uniqueness_reflection(panel, persona_notes=persona_notes)
+    if _progress:
+        try:
+            print(f"[NOVELTY] Uniqueness reflection: unique_ideas={len(uniq.get('unique_ideas') or [])}")
+        except Exception:
+            pass
 
     final = {
         "num_papers": len(summaries),
@@ -648,6 +899,11 @@ def main() -> None:
         final = {"novelty_ideas": final.get("novelty_ideas", [])}
     with open(REPORT_PATH, "w", encoding="utf-8") as f:
         json.dump(final, f, ensure_ascii=False, indent=2)
+    if _progress:
+        try:
+            print(f"[NOVELTY] Report path: {REPORT_PATH}")
+        except Exception:
+            pass
     if is_verbose():
         try:
             theme_names = [str(t.get("name") or "") for t in (final.get("themes") or [])]

@@ -1,30 +1,39 @@
-# Update summarize.py for Must-Capture Fields
+# Novelty Facets + Scoring Gate (Windows + Git‑Bash / CMD)
 
-Plan
+Checklist (what I will do)
 
-- Tighten LLM prompts to require normalized training knobs, metrics with explicit AUC mode, and complete dataset_details keys.
-- Add deterministic post-processing in `agents/summarize.py` to ensure placeholders (empty values) exist when unknown and to normalize metrics list.
-- Keep schema unchanged; avoid fabricating values; only add normalized empty-key lines where required.
-- Validate by compiling sources and running pytest.
+- Add facet extractor to ground ideas in observed summaries.
+- Add idea scorer/gate to demote bland/off‑facet ideas.
+- Patch novelty to inject facets, require deltas, and multi‑temperature sample.
+- Optionally tighten persona prompts to cite titles + falsify deltas.
+- Compile sources and run pytest to validate.
 
-Steps
+Reasoning Protocol
 
-1. Update finalize normalization rules and main summarization instructions.
-2. Add enforcement in post-processing: training_procedure, hyperparameters, metrics, dataset_details.
-3. Make behavior togglable via YAML (`pipeline.summarize.enforce_required`) or `SUM_ENFORCE`.
-4. Patch novelty to emit numbered detailed ideas (`novelty_ideas`) via `agents/novelty.py` with toggles: `pipeline.novelty.detailed_ideas` and `NOVELTY_DETAILED`, and support ideas-only output via `pipeline.novelty.only_ideas` or `NOVELTY_ONLY_IDEAS=1`.
-5. Compile and run tests.
+- Plan: Mine facets from existing summaries, guide the LLM with those facets, enforce richer idea schema (derived_from_titles + delta_vs_prior + numeric specs), and filter weak ideas before writing the report.
+- Steps: Facets module • Scoring module • Patch novelty imports + function + main • Optional persona prompt tweaks • Compile • Pytest.
+- Risks: LLM calls need keys; prompt tightening may reduce idea count; scoring may over‑penalize if facets are sparse; Windows quoting for compile.
+- Rollback: Disable via env (NOVELTY_DETAILED=0 or NOVELTY_ONLY_IDEAS=1); skip scoring (set keep_top high, min_score low); revert plan if needed.
 
-Risks
+Steps (execution)
 
-- Might introduce duplicate metric entries if user-provided config also injects metrics.
-- Some summaries may gain placeholder lines (e.g., `batch_size:`) even when unknown.
-- Overly generic AUC tag `(unspecified)` when mode truly absent.
-- Novelty ideas quality depends on LLM responses and input summaries; ensure secrets are configured.
+1) Create `lab/novelty_facets.py` to extract facets from `data/summaries/*.json`.
+2) Create `lab/novelty_scoring.py` to score and filter `new_ideas_detailed`.
+3) Edit `agents/novelty.py`:
+   - Imports for `extract_facets` and `score_and_filter_ideas`.
+   - Update `group_novelty_and_ideas(..., facets=...)` to inject facets, require derived_from_titles + delta_vs_prior, and sample temperatures.
+   - In `main()`, build facets, call the updated grouper, then score/filter before report.
+   - Optional: tighten persona prompts to cite titles and include a falsifying ablation.
+4) Compile and run tests.
 
-Rollback
+Runbook (Windows CMD from Git‑Bash or PowerShell)
 
-- Set `SUM_ENFORCE=0` or `pipeline.summarize.enforce_required: false` to disable.
-- Set `NOVELTY_DETAILED=0` or `pipeline.novelty.detailed_ideas: false` to disable detailed novelty ideas.
-- Set `NOVELTY_ONLY_IDEAS=1` for ideas-only reports or remove the flag to restore full report.
-- Revert this patch if undesired.
+- Install deps: `cmd.exe /C "python -m pip install -r requirements.txt --disable-pip-version-check"`
+- Compile: `cmd.exe /C "python dev\compile_all.py"`
+- Tests: `cmd.exe /C "python -m pytest -q"`
+- Novelty (after summarize): `cmd.exe /C "python -m agents.novelty"`
+
+Notes
+
+- Optional sampling: set YAML `pipeline.novelty.sampling.temperatures: [0.2, 0.6, 0.9]`.
+- Optional ban list: `NOVELTY_BAN="resnet18,flip,jitter"`.
