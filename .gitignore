@@ -8,14 +8,14 @@ __pycache__/
 .venv
 venv/
 env/
-
+.cache#llm
 # Jupyter
 .ipynb_checkpoints/
 
 # VS Code
 .vscode/
 .history/
-
+.json
 # OS files
 .DS_Store
 Thumbs.db
@@ -62,3 +62,5 @@ pdfs/
 *.tmp
 *.bak
 ~$*
+.cache/llm/
+experiments/

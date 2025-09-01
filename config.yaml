@@ -3,7 +3,7 @@
 
 project:
   # Only prompt override: the goal (domain-agnostic)
-  goal: "your goal"
+  goal: "i want to do skin cancer classification and detection using deep learning model"
   # Optional explicit title (used in paper/report); leave empty to auto-generate
   title: ""
 
@@ -43,13 +43,38 @@ pipeline:
   # Skip stages automatically without CLI or env flags
   skip:
     find_papers: true
-    novelty: true
+    summaries: true
+    novelty: false
     planner: false
     iterate: false
+    lit_review: true
   # Number of iterate cycles (fallback to 2 if unset)
   max_iters: 2
   # Write paper draft at the end
   write_paper: false
+  # Re-run stages even if artifacts already exist
+  always_fresh: true
+  novelty:
+    personas:
+      enable: true
+      steps: 4
+      print: true
+      debate:
+        enable: true
+        rounds: 2
+        roles: [PhD, PhD, Professor, Professor, Postdoc, Postdoc]
+        until_agree: true
+        # Optional absolute cap for safety in long debates; set 0 for auto-cap
+        # max_rounds: 20
+    uniqueness:
+      enable: true
+  planner:
+    personas:
+      enable: true
+      print: true
+  write_paper:
+    llm:
+      enable: true
   # Human-in-the-loop confirmation gates
   hitl:
     confirm: false

@@ -50,12 +50,18 @@ def _persona_notes(novelty: Dict[str, Any], plan: Dict[str, Any]) -> List[str]:
         return []
     try:
         dm = DialogueManager()
-        dm.post("User", "We will generate tiny training hooks. Provide concise guidance.")
+        dm.post(
+            "User",
+            (
+                "We will generate tiny training hooks (transforms/head/spec tweaks) under tight compute.\n"
+                "Provide role-specific, concrete guidance: key transforms or head tweaks to try first, safe ranges (lr/steps), and quick validation checks."
+            ),
+        )
         ctx = json.dumps({"novelty": novelty, "plan": plan}, ensure_ascii=False)
         dm.post("User", f"Context: {ctx}")
         notes: List[str] = []
         for role in ["PhD", "Professor", "SW", "ML"]:
-            r = dm.step_role(role, prompt="Give 3 short actionable bullets to guide code updates.")
+            r = dm.step_role(role, prompt="Give 3 short actionable bullets to guide code updates. Be concrete and within constraints.")
             notes.append(f"[{role}] {r.get('text','')}")
         return notes
     except Exception:

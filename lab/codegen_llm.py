@@ -68,14 +68,14 @@ def write_generated_aug_from_llm(description: str, extra_context: Optional[str] 
     callers should fall back to lab.codegen_utils.write_generated_aug.
     """
     sys_prompt = (
-        "You are a careful ML engineer. Write a tiny Python module defining a class "
-        "GeneratedAug that wraps torchvision transforms. Only use this whitelist: "
-        "T.ColorJitter, T.RandomRotation, T.RandomErasing, T.GaussianBlur, "
-        "T.RandomHorizontalFlip, T.Compose. Keep imports minimal. No file I/O, "
-        "no network, no training. Provide only code in a Python fenced block."
+        "You are a careful ML engineer writing a tiny Python augmentation module.\n"
+        "Define class GeneratedAug that wraps torchvision transforms.\n"
+        "WHITELIST ONLY: T.ColorJitter, T.RandomRotation, T.RandomErasing, T.GaussianBlur, T.RandomHorizontalFlip, T.Compose, T.Resize, T.ToTensor.\n"
+        "Constraints: minimal imports; absolutely NO file I/O, NO network, NO training or model code, NO side effects.\n"
+        "Output: ONLY a single Python fenced code block with the complete module."
     )
     user_prompt = (
-        "Create a module that matches exactly this skeleton and behavior:\n\n"
+        "Create a module that matches exactly this skeleton and behavior. Keep the transform list short and deterministic where possible.\n\n"
         "try:\n    import torchvision.transforms as T\n"
         "except Exception:\n    T = None\n\n"
         "class GeneratedAug:\n"
@@ -84,7 +84,7 @@ def write_generated_aug_from_llm(description: str, extra_context: Optional[str] 
         "    def __call__(self, x):\n        if self.pipe is None:\n            return x\n        return self.pipe(x)\n\n"
         "Choose transforms based on this description: '" + (description or "") + "'.\n"
         + ("Context: " + extra_context if extra_context else "") + "\n"
-        "Only use the allowed transforms. Keep it short."
+        "Only use the allowed transforms (no others). Keep it short (<=4 transforms)."
     )
 
     try:
@@ -106,4 +106,3 @@ def write_generated_aug_from_llm(description: str, extra_context: Optional[str] 
             except Exception:
                 return None
     return None
-

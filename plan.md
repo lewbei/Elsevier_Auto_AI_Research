@@ -139,6 +139,41 @@ Rollback
 - If needed, revert moves by restoring files to the top level and removing new package paths.
 
 
+Novelty Multi‑Agent Discussion
+
+Checklist (what I will do)
+
+- Add optional persona discussion before novelty clustering
+- Log transcript to data/novelty_session.jsonl and novelty_transcript.md
+- Pass persona notes into clustering and outline prompts
+- Wire config/env flags; keep off by default
+- Compile sources and run pytest
+
+Plan
+
+- Introduce an optional DialogueManager‑based multi‑persona discussion in agents/novelty.py that summarizes themes and proposes ideas across paper summaries. Capture short notes and log the full transcript.
+- Feed persona notes into existing LLM calls (group clusters and research outline) as additional context to steer outputs without breaking current schema.
+- Control via YAML key pipeline.novelty.personas.enable or env NOVELTY_PERSONAS=1, with steps controlled by pipeline.novelty.personas.steps or NOVELTY_STEPS.
+
+Steps
+
+1) Add _persona_discussion() helper and logging in agents/novelty.py
+2) Extend group_novelty_and_ideas()/derive_research_outline() to accept persona_notes
+3) Wire config/env flags and sensible defaults
+4) Compile entire repo and run pytest
+
+Risks
+
+- Missing DEEPSEEK_API_KEY causes persona discussion to no‑op; pipeline still works
+- Extra context could increase token usage; notes are short and summaries capped
+- File I/O for logs; best‑effort with exceptions suppressed
+
+Rollback
+
+- Disable via NOVELTY_PERSONAS=0 or pipeline.novelty.personas.enable: false
+- Ignore logs; remove data/novelty_session.jsonl and novelty_transcript.md if undesired
+
+
 Verbose Mode + Detailed Logging
 
 Checklist (what I will do)
@@ -174,3 +209,27 @@ Rollback
 
 - Disable by setting LOG_LEVEL=info and LLM_LOG=0
 - Remove logs/llm/ if space is a concern
+
+
+Summarizer Prompt Enhancement
+
+Checklist (what I will do)
+
+- Extend summarizer prompt with detailed schema
+- Preserve backward-compatible keys for novelty
+- Keep JSON-only, no hallucinations, short bullets
+- Compile and run pytest
+
+Plan
+
+- Update agents/summarize.py to request extensive metadata: authors/venue/year/DOI/URLs, background, RQs, hypotheses, tasks, architecture, training, hparams, datasets (+details), metrics, baselines, numeric results (metric/value/dataset/split/baseline/improvement), ablations, novelty types, overlaps, limitations, failures, ethics, threats to validity, reproducibility and resources, conclusions, future work, keywords, confidence.
+- Normalize core keys (title/problem/methods/datasets/results/novelty_claims/limitations/keywords/confidence) and include all extra fields as-is.
+
+Risks
+
+- Larger payloads may increase token usage; truncation to ~40k chars mitigates
+- Inconsistent JSON types from LLM; best-effort normalization added
+
+Rollback
+
+- Revert agents/summarize.py to earlier minimal schema and prompt

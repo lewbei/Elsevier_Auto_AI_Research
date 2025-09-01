@@ -1,17 +1,19 @@
-"""Generate a short paper draft from experiment artifacts.
+"""Generate a paper draft from experiment artifacts, with optional LLM drafting.
 
-Packaged version of the top-level script. Generates Markdown and LaTeX
-summaries from pipeline artifacts.
+Default path composes Markdown+LaTeX from artifacts. When enabled via
+config/env, an LLM drafts a full Markdown paper using section scaffolds
+and a brief reflection pass for clarity/consistency.
 """
 
 import json
 import pathlib
 import shutil
 import subprocess
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
-from lab.config import get
+from lab.config import get, get_bool
+from utils.llm_utils import chat_text_cached, LLMError
 
 
 load_dotenv()
@@ -152,6 +154,124 @@ def _render_md(title: str, novelty: Dict[str, Any], plan: Dict[str, Any], summar
     return "\n".join(lines)
 
 
+def _cap(s: str, n: int) -> str:
+    if not s:
+        return ""
+    return s if len(s) <= n else s[: n - 3] + "..."
+
+
+SECTION_TIPS = {
+    "Title": [
+        "Concise and informative; hint at method/setting/outcome",
+        "Avoid hype; under 2 lines"
+    ],
+    "Abstract": [
+        "Single paragraph TL;DR: problem, approach, results, takeaway",
+        "No hyperbole; numbers only if provided in inputs"
+    ],
+    "Introduction": [
+        "Context and motivation; why it matters",
+        "Contributions as bullets; scope under tight compute"
+    ],
+    "Related Work": [
+        "Compare/contrast closest work; cite when relevant",
+        "Explain why baselines are appropriate"
+    ],
+    "Methods": [
+        "Describe model/augmentations/training succinctly",
+        "Keep to primitives; avoid missing details"
+    ],
+    "Experimental Setup": [
+        "Datasets/paths/splits; metrics and evaluation",
+        "Training budget: <=1 epoch; steps and seeds"
+    ],
+    "Results": [
+        "Report numbers exactly as given; no invention",
+        "Compare baseline/novelty/ablation; call out deltas"
+    ],
+    "Discussion": [
+        "Interpret results under constraints; note trade-offs",
+        "State limitations and future work"
+    ],
+}
+
+
+def _llm_paper_md(novelty: Dict[str, Any], plan: Dict[str, Any], summary: Dict[str, Any], lit_review: Optional[str]) -> str:
+    title = str(get("project.title", "") or "Draft: Compact Research Report")
+    goal = str(get("project.goal", "your goal") or "your goal")
+    novelty_small = {
+        "themes": (novelty.get("themes") or [])[:6],
+        "new_ideas": (novelty.get("new_ideas") or [])[:8],
+        "unique_ideas": (novelty.get("unique_ideas") or [])[:8],
+    }
+    plan_small = {k: plan.get(k) for k in [
+        "objective", "hypotheses", "success_criteria", "datasets", "baselines",
+        "novelty_focus", "stopping_rules"
+    ] if k in plan}
+    runs = summary.get("runs", []) if isinstance(summary.get("runs"), list) else []
+    compact_runs: List[Dict[str, Any]] = []
+    for r in runs[:50]:
+        compact_runs.append({
+            "name": r.get("name"),
+            "metrics": r.get("result", {}).get("metrics", {}),
+        })
+    system = (
+        "You are an expert research writer drafting a Markdown paper under tight compute constraints.\n"
+        f"Project goal: {goal}.\n"
+        "Return ONLY Markdown (no code fences). Include sections: Title, Abstract, Introduction, Related Work, Methods, Experimental Setup, Results, Discussion, Limitations, References (optional).\n"
+        "Grounding and safety: use ONLY provided data; do NOT invent numbers, citations, or URLs. If a value is missing, state TBD rather than guessing.\n"
+        "Constraints: experiments are <=1 epoch with small steps; keep claims modest and reproducible.\n"
+        "Style: objective, concise paragraphs + short bullet lists where helpful."
+    )
+    tips_lines = []
+    for sec, tips in SECTION_TIPS.items():
+        tips_lines.append(f"- {sec} tips: " + "; ".join(tips))
+    user = {
+        "title": title,
+        "tips": tips_lines,
+        "novelty": novelty_small,
+        "plan": plan_small,
+        "runs": compact_runs,
+        "lit_review": _cap(lit_review or "", 18000),
+        "require": [
+            "Report numbers exactly as given (val/test metrics only if present)",
+            "Cite only if citation strings are provided (else omit)",
+            "Keep each section substantial but not verbose"
+        ],
+        "self_check": "Before responding, scan for invented numbers/claims and remove them; ensure headings present; return Markdown only.",
+    }
+    text = chat_text_cached([
+        {"role": "system", "content": system},
+        {"role": "user", "content": json.dumps(user, ensure_ascii=False)},
+    ], temperature=0.2)
+    draft = text.strip()
+
+    reflect_system = (
+        "You are a careful reviewer. Revise the draft Markdown to improve clarity, fix inconsistencies, and remove any invented content.\n"
+        "Maintain the same sections. Return FULL Markdown (no code fences)."
+    )
+    reflect_user = {
+        "draft": _cap(draft, 40000),
+        "checks": [
+            "Numbers appear only where provided in runs/summary",
+            "Methods/setup match constraints and plan",
+            "No missing sections; remove hype; keep objective tone"
+        ],
+        "self_check": "Before responding, ensure the output is complete Markdown, not partial, and contains no fenced code.",
+    }
+    try:
+        revised = chat_text_cached([
+            {"role": "system", "content": reflect_system},
+            {"role": "user", "content": json.dumps(reflect_user, ensure_ascii=False)},
+        ], temperature=0.0)
+        md = revised.strip()
+        if md:
+            return md
+    except LLMError:
+        pass
+    return draft
+
+
 def _render_latex(title: str, md_path: pathlib.Path, latex_table: str | None = None, include_fig: bool = False) -> str:
     return f"""\\documentclass[11pt]{{article}}
 \\usepackage[margin=1in]{{geometry}}
@@ -286,7 +406,26 @@ def main() -> None:
         if idea:
             title = f"Toward: {idea}"
 
-    md = _render_md(title, novelty, plan, summary)
+    # Optional LLM drafting mode
+    use_llm = get_bool("pipeline.write_paper.llm.enable", False) or (
+        str(os.getenv("WRITE_PAPER_LLM", "")).lower() in {"1", "true", "yes"}
+    )
+    lit_review: Optional[str] = None
+    try:
+        lp = DATA_DIR / "lit_review.md"
+        if lp.exists():
+            lit_review = lp.read_text(encoding="utf-8")
+    except Exception:
+        lit_review = None
+
+    if use_llm:
+        try:
+            md = _llm_paper_md(novelty, plan, summary, lit_review)
+        except LLMError as exc:
+            print(f"[WARN] LLM writer failed: {exc}; falling back to artifact composer.")
+            md = _render_md(title, novelty, plan, summary)
+    else:
+        md = _render_md(title, novelty, plan, summary)
     md_path = PAPER_DIR / "paper.md"
     md_path.write_text(md, encoding="utf-8")
 

@@ -11,10 +11,7 @@ class GeneratedAug:
             self.pipe = None
         else:
             self.pipe = T.Compose([
-                T.ColorJitter(0.1,0.1,0.1,0.05),
-                T.RandomRotation(10),
-                T.RandomErasing(p=0.25),
-                T.GaussianBlur(3)
+                T.RandomHorizontalFlip()
             ])
 
     def __call__(self, x):

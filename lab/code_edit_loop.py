@@ -170,17 +170,17 @@ def run_codegen_editor(description: str, extra_context: Optional[str] = None, ma
     current = SKELETON.splitlines()
 
     sys_prompt = (
-        "You are a careful ML engineer. You can update a tiny training hooks file "
-        "via REPLACE or EDIT commands. Only use torchvision transforms (ColorJitter, RandomRotation, RandomErasing, "
-        "GaussianBlur, RandomHorizontalFlip, Resize, ToTensor) and torch.nn layers. No file/network/system access. "
-        "Always return a single fenced block: ```REPLACE ...``` or ```EDIT N M ...```."
+        "You are a careful ML engineer performing constrained code edits for a tiny training hooks file.\n"
+        "You may only return one fenced block per turn: either ```REPLACE ...``` (entire file) or ```EDIT N M ...``` (line range replacement).\n"
+        "Allowed building blocks: torchvision transforms (ColorJitter, RandomRotation, RandomErasing, GaussianBlur, RandomHorizontalFlip, Resize, ToTensor) and torch.nn layers.\n"
+        "Absolutely no file/network/system access, subprocess, sockets, or unsafe imports. Keep diffs minimal and deterministic."
     )
     user_base = (
-        "Target file defines three functions: build_train_transforms(input_size), "
-        "build_model_head(in_features, num_classes), update_spec(spec).\n\n"
+        "Target file defines exactly three functions: build_train_transforms(input_size), build_model_head(in_features, num_classes), update_spec(spec).\n"
         f"Novelty description: {description}\n"
         + (f"Context: {extra_context}\n" if extra_context else "") +
-        "Start by returning a full file with ```REPLACE``` that modifies the skeleton minimally to reflect the novelty."
+        "Instructions: start with a full-file ```REPLACE``` that minimally modifies the skeleton to reflect the novelty (<=4 transforms, small heads).\n"
+        "Use only allowed transforms/layers; keep safe ranges (lr 1e-5..1e-1, steps 10..1000, input 96..512); preserve function signatures and comments."
     )
 
     err_msg = ""

@@ -41,6 +41,7 @@ Environment Setup (Windows + Git‑Bash)
   - SKIP_NOVELTY=1 to skip Step 2 (novelty)
   - SKIP_PLANNER=1 to skip Step 2.5 (planner)
   - SKIP_ITERATE=1 to skip Step 3 (iterate)
+  - ALWAYS_FRESH=1 to re-run steps even if prior artifacts exist (plan.json, novelty_report.json, 40+ PDFs)
   - Verbose + LLM tracing:
     - LOG_LEVEL=debug to print detailed progress to console
     - VERBOSE=1 alias for debug mode
@@ -64,6 +65,7 @@ YAML Config Override (project‑level)
       novelty: true          # skip Step 2 (requires data/novelty_report.json)
       planner: false         # run planner (writes data/plan.json)
       iterate: false         # run iterate
+    always_fresh: true       # do not auto-skip when artifacts already exist
     max_iters: 5             # number of iteration cycles
     write_paper: true        # write paper at the end
     hitl:

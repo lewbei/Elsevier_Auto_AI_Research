@@ -23,9 +23,12 @@ def _ensure_dirs() -> None:
 def propose_experiment(novelty: Dict[str, Any]) -> Dict[str, Any]:
     topic = str(get("project.goal", "your task") or "your task")
     system = (
-        "You are an AI scientist planning a minimal, runnable deep-learning experiment for " + topic + ". "
-        "Given themes and new ideas, propose a concrete spec using accessible components. Keep it simple and runnable "
-        "on limited compute (<= 1 epoch, small steps)."
+        "You are an AI scientist proposing a minimal, runnable deep-learning experiment.\n"
+        f"Context goal: {topic}.\n"
+        "Constraints: CPU or single GPU, <=1 epoch per run, small step budgets, minimal dependencies.\n"
+        "Task: given novelty themes and ideas, propose a concrete spec with explicit values (dataset path, input_size, model, epochs, batch_size, lr, max_train_steps, seed) and a tightly scoped novelty_component.\n"
+        "Favor standard torchvision models and simple augmentations; keep the design verifiable and reproducible.\n"
+        "Self-check: Before responding, validate keys/types per output_schema and constraints; return JSON only."
     )
     user_payload = {
         "novelty_report": novelty,

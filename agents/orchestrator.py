@@ -39,7 +39,13 @@ def _persona_phase_notes(phase: str, context: Dict[str, Any], steps: int = 2) ->
         return []
     try:
         dm = DialogueManager()
-        dm.post("User", f"Phase: {phase}. Provide brief, actionable guidance.")
+        dm.post(
+            "User",
+            (
+                f"Phase: {phase}. Provide structured, actionable guidance tailored to limited compute (<=1 epoch, small steps).\n"
+                "Include: top 3 priorities, key risks with mitigations, and the minimal concrete actions to advance this phase. Be specific."
+            ),
+        )
         dm.post("User", f"Context: {json.dumps(context, ensure_ascii=False)}")
         notes: List[str] = []
         for i in range(max(1, steps)):
@@ -78,6 +84,16 @@ def main() -> None:
         _run_mod("agents.paper_finder")
     else:
         print("[ORCH] Skipping paper_finder per config/env")
+
+    # Phase: summaries (per-paper)
+    if not (get_bool("pipeline.skip.summaries", False) or (str(os.getenv("SKIP_SUMMARIES", "")).lower() in {"1", "true", "yes"})):
+        notes = _persona_phase_notes("summaries", {}, steps)
+        if notes:
+            log("summaries_notes", notes)
+            _write_text(notes_dir / "summaries.txt", "\n\n".join(notes))
+        _run_mod("agents.summarize")
+    else:
+        print("[ORCH] Skipping summaries per config/env")
 
     # Phase: novelty
     if not (get_bool("pipeline.skip.novelty", False) or (str(os.getenv("SKIP_NOVELTY", "")).lower() in {"1", "true", "yes"})):
@@ -148,4 +164,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

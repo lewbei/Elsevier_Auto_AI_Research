@@ -74,9 +74,10 @@ def _iter_persona_notes(context: Dict[str, Any]) -> List[str]:
 def propose_baseline_and_novelty(novelty: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
     topic = str(get("project.goal", "your task") or "your task")
     system = (
-        "You are an AI scientist. Propose two minimal experiment specs for " + topic + ": "
-        "(1) a baseline using standard components, (2) a novelty variant incorporating a single, concrete novelty; "
-        "and (3) an ablation that removes the novelty component from (2) only. Keep runnable on CPU in <= 1 epoch and small steps. Return JSON."
+        "You are an AI scientist. Propose three minimal, runnable experiment specs: (1) baseline with standard components, \n"
+        "(2) novelty variant incorporating exactly one concrete novelty, and (3) ablation that is identical to (2) but with novelty disabled.\n"
+        f"Target context: {topic}. Respect constraints: CPU/1 epoch/small steps. Return STRICT JSON adhering to the provided schema with explicit values.\n"
+        "Self-check: Before responding, validate keys/types per output_schema and constraints; fix mismatches and return JSON only."
     )
     # Optionally include plan.json and persona notes (multi‑persona integration)
     plan_ctx = {}
@@ -250,9 +251,10 @@ def engineer_refine_specs(
 ) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
     """Use LLM to suggest targeted changes; then verify/normalize specs."""
     system = (
-        "You are an Engineer agent. Given baseline/novelty/ablation specs and their metrics, propose small, safe refinements "
-        "to improve novelty performance while keeping constraints (<=1 epoch, small steps). Only tweak lr (0.5x-2x), "
-        "max_train_steps (+/- up to 50), input_size (keep 96-512), or enable/disable novelty. Return JSON with updated specs."
+        "You are the Engineer. Given baseline/novelty/ablation specs and metrics, suggest SMALL, SAFE refinements to improve novelty while respecting constraints.\n"
+        "Allowed changes only: lr (0.5x–2x), max_train_steps (+/- up to 50), input_size (96–512), and novelty_component.enabled.\n"
+        "Do not change datasets or model families. Return STRICT JSON with updated specs; preserve unspecified fields.\n"
+        "Self-check: Before responding, validate keys/types and allowed ranges; return JSON only."
     )
     compact = []
     for r in prior_results:
@@ -628,8 +630,9 @@ def aggregate_repeats(runs: List[Dict[str, Any]]) -> Dict[str, Dict[str, float]]
 def _review_iteration(results: List[Dict[str, Any]], decision: Dict[str, Any], novelty_spec: Dict[str, Any]) -> Dict[str, Any]:
     """LLM reviewer: compare novelty vs baseline/ablation and recommend proceed/stop."""
     system = (
-        "You are a peer reviewer. Given experiment results (names, specs, metrics) and a decision heuristic, "
-        "write a short summary, rate novelty performance, and recommend 'proceed' or 'stop'. Return JSON."
+        "You are a peer reviewer. Given compact results (names/specs/metrics) and the decision heuristic, summarize outcomes,\n"
+        "quantify novelty vs baseline/ablation, and recommend 'proceed' or 'stop'. Provide one-sentence rationale and 3–5 brief notes. Return STRICT JSON.\n"
+        "Self-check: Before responding, ensure keys/types match and numbers derive from provided metrics only."
     )
     compact = []
     for r in results:
