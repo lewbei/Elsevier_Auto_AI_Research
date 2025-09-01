@@ -43,8 +43,9 @@ pipeline:
   # Skip stages automatically without CLI or env flags
   skip:
     find_papers: true
-    summaries: true
+    summaries: false
     novelty: false
+    idea_blueprints: false
     planner: false
     iterate: false
     lit_review: true
@@ -71,7 +72,8 @@ pipeline:
   planner:
     personas:
       enable: true
-      print: true
+  idea_blueprints:
+    top_k: 3
   write_paper:
     llm:
       enable: true

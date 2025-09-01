@@ -116,6 +116,13 @@ def main() -> None:
     else:
         run_step(py, ["-m", "agents.novelty"])  # packaged agent
 
+    # 2.4) Idea blueprints (per-novelty idea mini-plans)
+    skip_ideas = get_bool("pipeline.skip.idea_blueprints", False) or (str(os.getenv("SKIP_IDEA_BLUEPRINTS", "")).lower() in {"1", "true", "yes"})
+    if skip_ideas:
+        print("[SKIP] Step 2.4 (idea_blueprints) skipped (env/config).")
+    else:
+        run_step(py, ["-m", "agents.idea_blueprints"])  # expand ideas into runnable blueprints
+
     # 2.5) Planner: derive a compact plan.json from novelty report
     plan_path = HERE / "data" / "plan.json"
     skip_planner = get_bool("pipeline.skip.planner", False) or (str(os.getenv("SKIP_PLANNER", "")).lower() in {"1", "true", "yes"})
