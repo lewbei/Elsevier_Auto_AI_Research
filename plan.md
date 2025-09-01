@@ -37,3 +37,27 @@ Notes
 
 - Optional sampling: set YAML `pipeline.novelty.sampling.temperatures: [0.2, 0.6, 0.9]`.
 - Optional ban list: `NOVELTY_BAN="resnet18,flip,jitter"`.
+
+---
+
+# Planner Alignment with Novelty v2
+
+Checklist (what I will do)
+
+- Pass novelty outline (problems/objectives/contributions/research_questions) to planner.
+- Provide top novelty_ideas (id/title/kind/spec_hint/eval_plan) as candidates.
+- Update PI/Engineer/Reviewer prompts to ground on these fields.
+- Improve offline fallback to pick a candidate and seed tasks.
+- Compile sources and run pytest to validate.
+
+Reasoning Protocol
+
+- Plan: Make planner consume the richer novelty report by explicitly surfacing outline fields and filtered novelty_ideas, so plans choose a concrete novelty_focus and actionable tasks aligned with eval_plan/spec_hint.
+- Steps: Inputs (outline+candidates) • Prompt updates • Offline fallback enrichment • Compile • Tests.
+- Risks: LLM may ignore fields; candidate selection order may not reflect quality; Windows quoting for compile.
+- Rollback: Revert to previous prompts; disable candidate injection via YAML flag if needed; fall back to offline minimal plan.
+
+Runbook (Windows CMD from Git‑Bash)
+
+- Compile: `cmd.exe /C "python dev\compile_all.py"`
+- Tests: `cmd.exe /C "python -m pytest -q"`
