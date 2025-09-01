@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 
 from utils.pdf_utils import extract_text_from_pdf
 from utils.llm_utils import chat_json, LLMError
+from lab.config import get
 
 
 load_dotenv()
@@ -241,12 +242,23 @@ def summarize_paper(text: str, title_hint: str = "") -> Dict[str, Any]:
     # Pass 1: extraction per chunk
     full_text = text
     packs: List[Dict[str, Any]] = []
-    chunk_size = int(os.getenv("SUM_PASS1_CHUNK", "20000") or 20000)
+    # If pass1_chunk <= 0, treat as "no chunking" (use full text in one call)
+    try:
+        cfg_chunk = get("pipeline.summarize.pass1_chunk", None)
+        chunk_size = int(os.getenv("SUM_PASS1_CHUNK", str(cfg_chunk if isinstance(cfg_chunk, int) else "20000")) or 20000)
+    except Exception:
+        chunk_size = 20000
+    if chunk_size <= 0:
+        chunk_size = len(full_text) or 1
     show_progress = str(os.getenv("SUM_PROGRESS", "1")).lower() in {"1", "true", "yes", "on"}
+    show_detail = str(os.getenv("SUM_DETAIL", "")).lower() in {"1", "true", "yes", "on"}
     if len(full_text) <= chunk_size:
         if show_progress:
             print(f"[SUM] Pass1: 1 chunk (size={len(full_text)})")
+        t0 = time.time()
         packs.append(_llm_pass1_extraction(full_text))
+        if show_detail:
+            print(f"[SUM]  • chunk 1 took {time.time()-t0:.1f}s")
     else:
         n_chunks = (len(full_text) + chunk_size - 1) // chunk_size
         if show_progress:
@@ -255,20 +267,49 @@ def summarize_paper(text: str, title_hint: str = "") -> Dict[str, Any]:
         for i in range(0, len(full_text), chunk_size):
             idx += 1
             if show_progress:
-                print(f"[SUM]  • chunk {idx}/{n_chunks} …")
+                start = i
+                end = min(i + chunk_size, len(full_text))
+                print(f"[SUM]  • chunk {idx}/{n_chunks} ({start}:{end}) …")
+            t0 = time.time()
             packs.append(_llm_pass1_extraction(full_text[i : i + chunk_size]))
+            if show_detail:
+                print(f"[SUM]    ⤷ chunk {idx} took {time.time()-t0:.1f}s")
     # Merge packs (LLM)
     if show_progress:
         print("[SUM] Merge extraction packs …")
+    t0 = time.time()
     merged = _llm_merge_packs(packs)
+    if show_detail:
+        meta = merged.get("meta", {}) if isinstance(merged.get("meta"), dict) else {}
+        meta_present = [k for k in ("title","venue","year","doi","url") if meta.get(k)]
+        print(f"[SUM]  • merge took {time.time()-t0:.1f}s; meta={meta_present} datasets={len(merged.get('datasets',[]) or [])} "
+              f"metrics={len(merged.get('metrics',[]) or [])} results_numbers={len(merged.get('results_numbers',[]) or [])}")
     # Pass 2: gap fill
     if show_progress:
         print("[SUM] Gap‑fill missing fields …")
+    t0 = time.time()
     merged2 = _llm_pass2_gap_fill(full_text, merged)
+    if show_detail:
+        # crude diff: count fields newly filled in meta and list counts that increased
+        filled = []
+        for k in ("title","venue","year","doi","url"):
+            if (merged.get("meta",{}).get(k) in (None, "")) and (merged2.get("meta",{}).get(k)):
+                filled.append(k)
+        def _len(x):
+            return len(x or []) if isinstance(x, list) else 0
+        diffs = []
+        for k in ("datasets","metrics","results_numbers","results","ablations","baselines","novelty_claims"):
+            a, b = _len(merged.get(k)), _len(merged2.get(k))
+            if b > a:
+                diffs.append(f"{k}+{b-a}")
+        print(f"[SUM]  • gap‑fill took {time.time()-t0:.1f}s; meta_filled={filled or 'none'}; list_increases={', '.join(diffs) or 'none'}")
     # Pass 3: finalize to target schema
     if show_progress:
         print("[SUM] Finalize to target schema …")
+    t0 = time.time()
     js = _llm_pass3_finalize_schema(merged2)
+    if show_detail:
+        print(f"[SUM]  • finalize took {time.time()-t0:.1f}s")
 
     # Optional: JSON schema validation/repair (if jsonschema installed)
     def _validate_or_repair(j: Dict[str, Any]) -> Dict[str, Any]:
@@ -381,6 +422,12 @@ def summarize_paper(text: str, title_hint: str = "") -> Dict[str, Any]:
     except Exception:
         out["_completeness"] = 0.0
 
+    if show_detail:
+        print(
+            "[SUM] Final stats: "
+            f"title='{out.get('title','')[:60]}', venue='{out.get('venue','')}', year='{out.get('year','')}', doi_present={bool(out.get('doi'))}, "
+            f"results_numbers={len(out.get('results_numbers',[]))}, dataset_details={len(out.get('dataset_details',[]))}, completeness={out.get('_completeness',0.0)}"
+        )
     return out
 
 
@@ -436,8 +483,11 @@ def main() -> None:
 
         print(f"[PDF {i}/{len(pdfs)}] Extracting: {pdf.name}")
         try:
-            max_pages = int(os.getenv("SUM_MAX_PAGES", "12") or 12)
-            max_chars = int(os.getenv("SUM_MAX_CHARS", "40000") or 40000)
+            # YAML overrides take precedence; env can override YAML
+            cfg_max_pages = get("pipeline.summarize.max_pages", None)
+            cfg_max_chars = get("pipeline.summarize.max_chars", None)
+            max_pages = int(os.getenv("SUM_MAX_PAGES", str(cfg_max_pages if isinstance(cfg_max_pages, int) else "12")) or 12)
+            max_chars = int(os.getenv("SUM_MAX_CHARS", str(cfg_max_chars if isinstance(cfg_max_chars, int) else "40000")) or 40000)
             text = extract_text_from_pdf(pdf, max_pages=max_pages, max_chars=max_chars)
         except Exception as exc:
             print(f"[SKIP] Failed to extract text: {pdf.name} :: {exc}")
