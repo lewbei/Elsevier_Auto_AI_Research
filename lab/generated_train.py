@@ -1,121 +1,116 @@
-# Tiny training hooks for ResNet18 + fixed multi-scale edge modulator (CFEM-O)
-# Exposes exactly three functions required by the training harness:
-#   build_train_transforms(input_size)
-#   build_model_head(in_features, num_classes)
-#   update_spec(spec)
-#
-# This file is intentionally minimal and deterministic. It does not construct the
-# modulator layers themselves (those are attached in model construction code),
-# but it injects the required configuration for the harness to build/freeze
-# modules and to compute the orthogonality regularizer schedule.
-
-from typing import Dict, Any
-from torchvision import transforms
+import torchvision.transforms as T
 import torch.nn as nn
-import copy
 
-# Build a compact but useful augmentation pipeline (<=4 transforms).
-# Allowed transforms: Resize, RandomHorizontalFlip, ColorJitter, ToTensor.
-def build_train_transforms(input_size: int):
-    # Keep input_size in safe range [96, 512]
-    if input_size < 96:
-        input_size = 96
-    elif input_size > 512:
-        input_size = 512
+def build_train_transforms(input_size):
+    """
+    Build a compact, deterministic training pipeline.
+    Allowed transforms: Resize, RandomHorizontalFlip, ColorJitter, ToTensor.
+    Keep augmentations small for medical images.
+    """
+    # clamp input_size to safe range (96..512)
+    if input_size is None:
+        input_size = 224
+    input_size = int(max(96, min(512, input_size)))
 
-    return transforms.Compose([
-        transforms.Resize((input_size, input_size)),
-        transforms.RandomHorizontalFlip(p=0.5),
-        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1, hue=0.05),
-        transforms.ToTensor(),
+    transforms = T.Compose([
+        T.Resize((input_size, input_size)),
+        T.RandomHorizontalFlip(p=0.5),
+        T.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.05, hue=0.02),
+        T.ToTensor(),
     ])
+    return transforms
 
 
-# Lightweight classifier head used on top of a ResNet backbone.
-# in_features: number of channels fed to the head (flattened if needed).
-# num_classes: final output classes.
-def build_model_head(in_features: int, num_classes: int):
-    # keep a tiny head compatible with short-probe regime training
-    mid = max(16, in_features // 4)
-    return nn.Sequential(
-        nn.Linear(in_features, mid),
+def build_model_head(in_features, num_classes):
+    """
+    Small classification head suitable for EfficientNet pooled features.
+    Uses only torch.nn layers.
+    """
+    # ensure integer intermediate size
+    hidden = max(1, in_features // 2)
+    head = nn.Sequential(
+        nn.Linear(in_features, hidden),
         nn.ReLU(inplace=True),
-        nn.Dropout(p=0.5),
-        nn.Linear(mid, num_classes),
+        nn.Dropout(p=0.2),
+        nn.Linear(hidden, num_classes),
     )
+    return head
 
 
-# Update the experiment spec to include the modulator / orthogonality schedule and
-# short-probe training defaults. This function performs minimal, deterministic edits.
-def update_spec(spec: Dict[str, Any]) -> Dict[str, Any]:
-    s = copy.deepcopy(spec)
+def update_spec(spec):
+    """
+    Update the experiment spec to reflect the 'Agreement-weighted CAM pseudo-box distillation'
+    novelty. This function makes minimal, deterministic edits:
+      - Enforce short-budget training settings (epochs, steps, batch, optimizer, lr).
+      - Ensure input_size is in [96, 512].
+      - Insert a concise novelty_component describing the agreement-weighting procedure
+        and its numeric hyperparameters used to produce pseudo-boxes.
+    Returns the updated spec dict.
+    """
+    # ensure spec is a dict-like object
+    if spec is None:
+        spec = {}
 
-    # Ensure sensible, safe ranges for a reproducible run
-    s.setdefault("seed", 42)
-    s["batch_size"] = 8  # short-probe baseline
-    s["max_train_steps"] = 100
-    s["lr"] = float(max(1e-5, min(1e-1, s.get("lr", 1e-4))))
-    # set default optimizer if missing
-    s.setdefault("optimizer", "adam")
+    # Enforce safe input size range
+    input_size = spec.get("input_size", 224)
+    input_size = int(max(96, min(512, input_size)))
+    spec["input_size"] = input_size
 
-    # Novelty component / modulator config describing how to construct the module.
-    # The actual implementation in model-building code should:
-    #  - compute a fixed multi-scale edge prior (3x3 Sobel + 5x5 Laplacian),
-    #    aggregate to a single 1-channel map, resize to match ResNet layer2 spatial
-    #    dims, pass through a 1x1 conv + sigmoid => 'att' (channel attention).
-    #  - include a tiny learnable 3x3 edge branch (a small conv producing a
-    #    single-channel map). Pool both att and learned edge and compute orthogonality
-    #    loss L_orth = mean((cosine(pool(att), pool(learned_edge)))^2).
-    #  - fuse multiplicatively at ResNet layer2: feat := feat * (1 + alpha * att), alpha=1.0.
-    s.setdefault("novelty_component", {})
-    nc = s["novelty_component"]
-    nc["name"] = "fixed_multiscale_edge_modulator_cfem_o"
-    nc["enabled"] = True
+    # Short-budget training settings
+    spec["epochs"] = 1
+    spec["batch_size"] = 2
+    # clamp learning rate to a safe range (1e-5 .. 1e-1)
+    lr = float(spec.get("lr", 0.001))
+    lr = max(1e-5, min(1e-1, lr))
+    spec["lr"] = lr
+    # bounded train steps
+    max_steps = int(spec.get("max_train_steps", 100))
+    max_steps = max(10, min(1000, max_steps))
+    # override to recommended short-budget
+    spec["max_train_steps"] = 100
 
-    # Deterministic hyperparameters for the modulator
-    nc["fixed_edge_priors"] = {
-        "scales": [3, 5],                       # 3x3 Sobel + 5x5 Laplacian
-        "aggregation": "sum_to_single_channel", # aggregate to 1-channel map
-        "normalize": True,
+    # optimizer
+    spec["optimizer"] = "AdamW"
+
+    # Seed, keep deterministic default if missing
+    spec["seed"] = int(spec.get("seed", 42))
+
+    # Update title to reflect the novelty
+    spec["title"] = "Novelty: Agreement-weighted CAM → pseudo-box distillation (EfficientNet_b3 + frozen ViT + YOLOv5s)"
+
+    # Add concise, explicit novelty component description and parameters.
+    spec["novelty_component"] = {
+        "enabled": True,
+        "description": (
+            "Agreement-weighted CAM pseudo-box distillation. Compute Grad-CAM heatmap "
+            "from EfficientNet_b3 classifier. Extract pooled feature vector from EfficientNet_b3 "
+            "and compute cosine similarity with a frozen ViT_base_patch16_224 pooled vector. "
+            "Agreement is computed as agreement = clip(sigmoid((cos_sim - center)/scale), clip_min, clip_max) "
+            "with center=0.5, scale=0.1, clip_min=0.1, clip_max=0.9. Multiply Grad-CAM by agreement, "
+            "threshold heatmap at cam_threshold to obtain binary mask, remove connected components whose area "
+            "is below min_area_frac of image area, and convert remaining components into pseudo-boxes. "
+            "Assign pseudo-box scores proportional to (agreement * CAM_mass). Train YOLOv5s on these pseudo-boxes. "
+            "Primary evaluation: mAP@0.5 versus raw CAM baseline."
+        ),
+        # explicit numeric hyperparameters used by the procedure
+        "params": {
+            "cam_threshold": 0.25,
+            "min_area_frac": 0.005,
+            "agreement_center": 0.5,
+            "agreement_scale": 0.1,
+            "agreement_clip_min": 0.1,
+            "agreement_clip_max": 0.9,
+        },
+        "models_involved": [
+            "efficientnet_b3 (classifier, trainable for CAM)",
+            "vit_base_patch16_224 (frozen pooled vector for agreement)",
+            "yolov5s (detector trained on pseudo-boxes)"
+        ],
+        "pseudo_box_scoring": "score ≈ agreement * CAM_mass",
+        "eval_metric": "mAP@0.5 (primary)",
+        "baseline": "raw CAM → pseudo-box (no agreement weighting)"
     }
-    nc["modulation"] = {
-        "apply_at": "resnet_layer2",  # hook location
-        "fusion": "multiplicative",   # feat := feat * (1 + alpha * att)
-        "alpha": 1.0,
-        "att_transform": {"conv1x1_out_channels": None, "activation": "sigmoid"},
-    }
-    nc["learnable_edge_branch"] = {
-        "kernel_size": 3,
-        "out_channels": 1,
-        "init": "kaiming_uniform",
-        # only this branch + modulator + classifier head are unfrozen in short-probe
-    }
-    # Orthogonality regularizer schedule: lambda ramps linearly 0 -> 0.1 over 50 steps
-    nc["orthogonality"] = {
-        "loss_name": "L_orth",
-        "formulation": "mean((cosine(pool(att), pool(learned_edge)))^2)",
-        "lambda_max": 0.1,
-        "ramp_steps": 50,
-        "pooling": "global_avg",  # pooling used before cosine similarity
-    }
 
-    # Short-probe regime: freeze backbone except modulator, learnable-edge branch, classifier head.
-    # If the downstream harness wants "full" training, set short_probe to False externally.
-    s.setdefault("short_probe", True)
-    if s["short_probe"]:
-        s["freeze_backbone_except"] = ["modulator", "learnable_edge_branch", "head"]
-        # Ensure optimizer/steps consistent with short-probe baseline
-        s["batch_size"] = 8
-        s["max_train_steps"] = 100
-        s["lr"] = 1e-4
-
-    # Provide a concise textual description (useful for logging)
-    s["title"] = "ResNet18 + Fixed Multi-scale Sobel Multiplicative Modulator (CFEM-O)"
-    s["notes"] = (
-        "Inject fixed multi-scale edge prior (3x3 Sobel + 5x5 Laplacian), "
-        "1x1 conv + sigmoid => att, fuse at resnet layer2 multiplicatively with alpha=1.0. "
-        "Include tiny learnable 3x3 edge branch. Orthogonality loss ramps 0->0.1 over 50 steps. "
-        "Short-probe: freeze backbone except modulator/learnable-edge/head."
-    )
-
-    return s
+    # preserve other user-specified fields where reasonable
+    # return the updated spec
+    return spec

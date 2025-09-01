@@ -1,7 +1,7 @@
 End‑to‑End LLM Research: Init Plan (Windows + Git‑Bash)
 
 Checklist (what I will do)
-
+- GPT-5 family do not use temperature parameter
 - Verify Windows Python and env (.env) are set.
 - Install requirements with pip (Windows Python).
 - Compile all Python sources to catch syntax issues.

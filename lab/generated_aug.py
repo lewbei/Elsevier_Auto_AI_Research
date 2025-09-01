@@ -8,13 +8,12 @@ class GeneratedAug:
         if T is None:
             self.pipe = None
         else:
-            # Short, deterministic pipeline chosen to reflect the described edge-prior
-            # preprocessing: downsample to ResNet layer2 spatial dims (28x28),
-            # apply a fixed Gaussian smoothing (proxy for multi-scale edge ops),
+            # Keep the list short and deterministic where possible.
+            # Resize to the input size referenced in the spec, apply a small fixed blur,
             # then convert to tensor.
             self.pipe = T.Compose([
-                T.Resize((28, 28)),
-                T.GaussianBlur(kernel_size=5, sigma=1.0),
+                T.Resize((224, 224)),
+                T.GaussianBlur(kernel_size=3, sigma=0.1),
                 T.ToTensor(),
             ])
 

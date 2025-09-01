@@ -9,6 +9,8 @@ from datetime import datetime
 
 from dotenv import load_dotenv
 from utils.llm_utils import chat_json_cached, LLMError
+from utils.llm_utils import LLM_PROVIDER, LLM_MODEL
+from utils.llm_utils import LLM_CHAT_URL
 from lab.logging_utils import append_jsonl, is_verbose, vprint
 from lab.prompt_overrides import load_prompt
 from lab.config import dataset_name, dataset_path_for, get, get_bool
@@ -156,6 +158,29 @@ def validate_json(data: Dict[str, Any], schema: Dict[str, Any], name: str) -> No
         raise ValueError(f"{name} missing required keys: {missing}")
 
 
+def _print_schema_errors(tag: str, obj: Any, schema: Dict[str, Any]) -> None:
+    """Best-effort detailed schema diagnostics for invalid objects."""
+    try:
+        if jsonschema is None:
+            print(f"[SCHEMA] {tag}: jsonschema not installed; limited diagnostics. Offending value type={type(obj).__name__}.")
+            return
+        from jsonschema import Draft7Validator  # type: ignore
+        v = Draft7Validator(schema)
+        errs = list(v.iter_errors(obj))
+        if not errs:
+            print(f"[SCHEMA] {tag}: no detailed errors collected.")
+            return
+        print(f"[SCHEMA] {tag}: {len(errs)} issue(s) found. Showing first 5:")
+        for i, e in enumerate(errs[:5], start=1):
+            path = ".".join([str(p) for p in list(e.path)]) or "<root>"
+            print(f"  {i}) path={path} message={e.message}")
+    except Exception:
+        try:
+            print(f"[SCHEMA] {tag}: failed to produce detailed diagnostics.")
+        except Exception:
+            pass
+
+
 def atomic_write_json(path: pathlib.Path, obj: Dict[str, Any]) -> None:
     """Write JSON atomically with timestamped backup of previous file."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -170,6 +195,258 @@ def atomic_write_json(path: pathlib.Path, obj: Dict[str, Any]) -> None:
     shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+def _normalize_plan_shape(js: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Coerce a loosely-typed LLM plan object into the strict PLAN_SCHEMA types.
+    This does NOT drop information; it concatenates rich fields into strings
+    where the schema expects strings, and preserves original structure in logs.
+    """
+    if not isinstance(js, dict):
+        return {}
+
+    out: Dict[str, Any] = dict(js)  # shallow copy
+
+    # ---- baselines: array[string] ----
+    baselines = out.get("baselines")
+    norm_baselines: List[str] = []
+    if isinstance(baselines, list):
+        for b in baselines:
+            if isinstance(b, str):
+                s = b.strip()
+                if s:
+                    norm_baselines.append(s)
+            elif isinstance(b, dict):
+                name = str(b.get("name") or "").strip()
+                desc = str(b.get("description") or "").strip()
+                notes = str(b.get("notes") or "").strip()
+                exact_params = b.get("exact_params")
+                param_str = ""
+                if isinstance(exact_params, dict) and exact_params:
+                    try:
+                        # compact, stable ordering
+                        param_str = " | params=" + json.dumps(exact_params, sort_keys=True, ensure_ascii=False)
+                    except Exception:
+                        param_str = ""
+                concat = " : ".join([x for x in [name, desc] if x]).strip(" :")
+                concat = (concat + param_str + ((" | " + notes) if notes else "")).strip(" |")
+                if concat:
+                    norm_baselines.append(concat)
+            else:
+                try:
+                    s = json.dumps(b, ensure_ascii=False)
+                    if s:
+                        norm_baselines.append(s)
+                except Exception:
+                    pass
+    elif isinstance(baselines, str):
+        s = baselines.strip()
+        if s:
+            norm_baselines.append(s)
+    out["baselines"] = norm_baselines
+
+    # ---- novelty_focus: string ----
+    nf = out.get("novelty_focus")
+    if isinstance(nf, dict):
+        title = str(nf.get("title") or "").strip()
+        nid = str(nf.get("id") or "").strip()
+        kind = str(nf.get("novelty_kind") or "").strip()
+        spec = str(nf.get("short_spec") or nf.get("spec_hint") or "").strip()
+        # keep your voice and specificity
+        pieces = [p for p in [nid, title, kind, spec] if p]
+        out["novelty_focus"] = " — ".join(pieces) if pieces else ""
+    elif nf is None:
+        out["novelty_focus"] = ""
+    else:
+        out["novelty_focus"] = str(nf)
+
+    # ---- risks: array[{risk, mitigation}] ----
+    risks = out.get("risks")
+    norm_risks: List[Dict[str, str]] = []
+    if isinstance(risks, dict):
+        for k, v in risks.items():
+            if isinstance(v, dict):
+                r_txt = str(v.get("risk") or k or "").strip()
+                m_txt = str(v.get("mitigation") or "").strip()
+            else:
+                r_txt = str(k or "").strip()
+                m_txt = str(v or "").strip()
+            if r_txt or m_txt:
+                norm_risks.append({"risk": r_txt, "mitigation": m_txt})
+    elif isinstance(risks, list):
+        for v in risks:
+            if isinstance(v, dict):
+                r_txt = str(v.get("risk") or "").strip()
+                m_txt = str(v.get("mitigation") or "").strip()
+                if r_txt or m_txt:
+                    norm_risks.append({"risk": r_txt, "mitigation": m_txt})
+            elif isinstance(v, str):
+                norm_risks.append({"risk": v.strip(), "mitigation": ""})
+    out["risks"] = norm_risks
+
+    # ---- assumptions: array[string] ----
+    assumptions = out.get("assumptions")
+    if not isinstance(assumptions, list):
+        # salvage common misplacement under 'risks'
+        if isinstance(risks, dict) and isinstance(risks.get("assumptions"), list):
+            assumptions = risks.get("assumptions")
+        else:
+            assumptions = []
+    out["assumptions"] = [str(x).strip() for x in assumptions if str(x).strip()]
+
+    # ---- milestones: array[string] ----
+    ms = out.get("milestones")
+    norm_ms: List[str] = []
+    if isinstance(ms, list):
+        for m in ms:
+            if isinstance(m, str):
+                s = m.strip()
+                if s:
+                    norm_ms.append(s)
+            elif isinstance(m, dict):
+                name = str(m.get("name") or "").strip()
+                criteria = str(m.get("criteria") or "").strip()
+                s = " : ".join([x for x in [name, criteria] if x]).strip(" :")
+                if s:
+                    norm_ms.append(s)
+            else:
+                try:
+                    s = json.dumps(m, ensure_ascii=False)
+                    if s:
+                        norm_ms.append(s)
+                except Exception:
+                    pass
+    elif isinstance(ms, str):
+        s = ms.strip()
+        if s:
+            norm_ms.append(s)
+    out["milestones"] = norm_ms
+
+    # ---- datasets: array[{name, path}] ----
+    ds = out.get("datasets")
+    norm_ds: List[Dict[str, str]] = []
+    if isinstance(ds, list):
+        for d in ds:
+            if isinstance(d, dict):
+                name = str(d.get("name") or "").strip()
+                path = str(d.get("path") or "").strip()
+                if name or path:
+                    norm_ds.append({"name": name, "path": path})
+            elif isinstance(d, str):
+                norm_ds.append({"name": d.strip(), "path": ""})
+    elif isinstance(ds, dict):
+        name = str(ds.get("name") or "").strip()
+        path = str(ds.get("path") or "").strip()
+        if name or path:
+            norm_ds.append({"name": name, "path": path})
+    out["datasets"] = norm_ds
+
+    # ---- success_criteria: array[{metric, delta_vs_baseline:number}] ----
+    sc = out.get("success_criteria")
+    norm_sc: List[Dict[str, Union[str, float]]] = []
+    if isinstance(sc, list):
+        for s in sc:
+            if not isinstance(s, dict):
+                continue
+            metric = str(s.get("metric") or "").strip()
+            dvb = s.get("delta_vs_baseline")
+            if isinstance(dvb, str):
+                m = re.search(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", dvb)
+                dvb_num = float(m.group()) if m else 0.0
+            else:
+                try:
+                    dvb_num = float(dvb)
+                except Exception:
+                    dvb_num = 0.0
+            if metric:
+                norm_sc.append({"metric": metric, "delta_vs_baseline": dvb_num})
+    out["success_criteria"] = norm_sc
+
+    # ---- hypotheses: array[string] ----
+    hyps = out.get("hypotheses")
+    if isinstance(hyps, list):
+        out["hypotheses"] = [str(h).strip() for h in hyps if str(h).strip()]
+    elif isinstance(hyps, str):
+        out["hypotheses"] = [hyps.strip()]
+    else:
+        out["hypotheses"] = []
+
+    # ---- stopping_rules: array[string] ----
+    sr = out.get("stopping_rules")
+    if isinstance(sr, list):
+        out["stopping_rules"] = [str(x).strip() for x in sr if str(x).strip()]
+    elif isinstance(sr, str):
+        out["stopping_rules"] = [sr.strip()]
+    else:
+        out["stopping_rules"] = []
+
+    # ---- tasks: array[{name, why, steps:[string]}] ----
+    ts = out.get("tasks")
+    norm_tasks: List[Dict[str, Any]] = []
+    if isinstance(ts, list):
+        for t in ts:
+            if isinstance(t, dict):
+                name = str(t.get("name") or "").strip()
+                why = str(t.get("why") or "").strip()
+                steps = t.get("steps")
+                if isinstance(steps, list):
+                    steps_list = [str(s).strip() for s in steps if str(s).strip()]
+                elif isinstance(steps, str):
+                    steps_list = [steps.strip()]
+                elif steps is None:
+                    steps_list = []
+                else:
+                    try:
+                        steps_list = [json.dumps(steps, ensure_ascii=False)]
+                    except Exception:
+                        steps_list = []
+                norm_tasks.append({"name": name, "why": why, "steps": steps_list})
+            elif isinstance(t, str):
+                norm_tasks.append({"name": t.strip(), "why": "", "steps": []})
+    out["tasks"] = norm_tasks
+
+    # ---- objective: string ----
+    obj = out.get("objective")
+    out["objective"] = str(obj or "").strip()
+
+    return out
+
+
+def _shape_diff(before: Dict[str, Any], after: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Return a structural diff focusing on types and presence.
+    Example output: {"risks": {"from": "object", "to": "array"}, "baselines[0]": {"from": "object", "to": "string"}}
+    """
+    def t(x):  # type name
+        if isinstance(x, list): return "array"
+        if isinstance(x, dict): return "object"
+        if isinstance(x, str): return "string"
+        if isinstance(x, bool): return "boolean"
+        if isinstance(x, (int, float)) and not isinstance(x, bool): return "number"
+        if x is None: return "null"
+        return type(x).__name__
+
+    diff: Dict[str, Any] = {}
+
+    # top-level keys
+    keys = set(before.keys()) | set(after.keys())
+    for k in sorted(keys):
+        b = before.get(k)
+        a = after.get(k)
+        tb, ta = t(b), t(a)
+        if tb != ta:
+            diff[k] = {"from": tb, "to": ta}
+        # spot check arrays first element
+        if isinstance(b, list) and b:
+            tb0 = t(b[0])
+        else:
+            tb0 = None
+        if isinstance(a, list) and a:
+            ta0 = t(a[0])
+        else:
+            ta0 = None
+        if tb0 != ta0 and (tb0 is not None or ta0 is not None):
+            diff[f"{k}[0]"] = {"from": tb0, "to": ta0}
+    return diff
 def _extract_outline(novelty: Dict[str, Any]) -> Dict[str, Any]:
     """Return a compact outline block from the novelty report (robust to missing keys)."""
     def _as_list(x):
@@ -259,6 +536,8 @@ def build_plan(novelty: Dict[str, Any]) -> Dict[str, Any]:
         "Grounding: use the provided novelty_outline (problems/objectives/contributions/research_questions) and choose ONE novelty_focus from novelty_candidates.\n"
         "Map the chosen candidate's eval_plan/spec_hint into concrete tasks/steps suitable for our environment.\n"
         "Include ALL of the following keys, each NON-EMPTY: objective, hypotheses, success_criteria (metric + delta vs baseline), datasets (name + path), baselines, novelty_focus, stopping_rules, tasks (name/why/steps), risks (risk/mitigation), assumptions, milestones.\n"
+        "STRICT success_criteria SHAPE: an ARRAY of OBJECTS, each {metric: string, delta_vs_baseline: number}.\n"
+        "Do NOT return 'primary_metric'/'secondary_metrics' objects; do NOT return strings like '+0.03 absolute' — use 0.03 for +3%.\n"
         "Metrics may include mAP@0.5, FP_per_image, precision@IoU0.5, IoU, Dice, AUC, ECE, or val_accuracy — choose metrics that match the novelty.\n"
         "Style: concise but unambiguous; avoid vague language; prefer values and thresholds.\n"
         "Self-check: validate keys/types/constraints match the schema; fix mismatches and return JSON only."
@@ -290,12 +569,65 @@ def build_plan(novelty: Dict[str, Any]) -> Dict[str, Any]:
         }
     }
     profile = get("pipeline.planner.llm", None)
-    js = chat_json_cached(system, json.dumps(user_payload, ensure_ascii=False), temperature=0.0, profile=profile)
+    model = get("pipeline.planner.model", None)
+    try:
+        _req_timeout = int(get("pipeline.planner.request_timeout", 180) or 180)
+    except Exception:
+        _req_timeout = 180
+    try:
+        _max_tries = int(get("pipeline.planner.request_retries", 4) or 4)
+    except Exception:
+        _max_tries = 4
+    def _omit_temp_for_gpt5() -> bool:
+        try:
+            prov = str((get("llm.provider", LLM_PROVIDER) or LLM_PROVIDER)).lower()
+            mod = str((model or get("llm.model", LLM_MODEL) or LLM_MODEL)).lower()
+            return prov == "openai" and (mod.startswith("gpt-5-") or mod == "gpt-5")
+        except Exception:
+            return False
+    if _omit_temp_for_gpt5():
+        js = chat_json_cached(
+            system,
+            json.dumps(user_payload, ensure_ascii=False),
+            model=model,
+            profile=profile,
+            timeout=_req_timeout,
+            max_tries=_max_tries,
+        )
+    else:
+        js = chat_json_cached(
+            system,
+            json.dumps(user_payload, ensure_ascii=False),
+            temperature=0.0,
+            model=model,
+            profile=profile,
+            timeout=_req_timeout,
+            max_tries=_max_tries,
+        )
 
     if not isinstance(js, dict):
         raise ValueError("LLM returned non-dict JSON for plan.")
-    # STRICT: validate raw response shape — no coercion/fallback
-    validate_json(js, PLAN_SCHEMA, "plan_from_llm")
+    # Normalize first, then strict validate
+    raw_js = js
+    js = _normalize_plan_shape(js)
+    try:
+        validate_json(js, PLAN_SCHEMA, "plan_from_llm")
+    except Exception as e:
+        print(f"[ERR] plan_from_llm schema violation: {e}")
+        _print_schema_errors("plan_from_llm", js, PLAN_SCHEMA)
+        # diagnostics: shape diff (raw -> normalized)
+        try:
+            sd = _shape_diff(raw_js, js)
+            append_jsonl(DATA_DIR / "plan_session.jsonl", {"role": "shape_diff", "stage": "build_plan", "diff": sd})
+        except Exception:
+            pass
+        raise
+    # Persist normalized build-plan
+    try:
+        append_jsonl(DATA_DIR / "plan_session.jsonl", {"role": "build_plan_raw", "content": raw_js})
+        append_jsonl(DATA_DIR / "plan_session.jsonl", {"role": "build_plan_normalized", "content": js})
+    except Exception:
+        pass
 
     # Minimal shape enforcement
     def _as_list(x):
@@ -329,7 +661,12 @@ def build_plan(novelty: Dict[str, Any]) -> Dict[str, Any]:
         "assumptions": js.get("assumptions") or [],
         "milestones": js.get("milestones") or [],
     }
-    validate_json(plan, PLAN_SCHEMA, "final_plan_from_build")
+    try:
+        validate_json(plan, PLAN_SCHEMA, "final_plan_from_build")
+    except Exception as e:
+        print(f"[ERR] final_plan_from_build schema violation: {e}")
+        _print_schema_errors("final_plan_from_build", plan, PLAN_SCHEMA)
+        raise
     return plan
 
 
@@ -363,7 +700,7 @@ def make_plan_offline(novelty: Dict[str, Any]) -> Dict[str, Any]:
     hyps = outline.get("research_questions") or outline.get("objectives") or [
         "A small augmentation or head change improves val acc by ~0.5pp"
     ]
-    return {
+    plan = {
         "objective": objective,
         "hypotheses": hyps[:3],
         "success_criteria": [{"metric": "val_accuracy", "delta_vs_baseline": 0.005}],
@@ -376,6 +713,7 @@ def make_plan_offline(novelty: Dict[str, Any]) -> Dict[str, Any]:
         "milestones": [],
         "risks": [],
     }
+    return _normalize_plan_shape(plan)
 
 
 def run_planning_session(novelty: Dict[str, Any]) -> Dict[str, Any]:
@@ -431,6 +769,24 @@ def run_planning_session(novelty: Dict[str, Any]) -> Dict[str, Any]:
         # Prepare outline/candidates for all roles
         outline = _extract_outline(novelty)
         candidates = _pick_candidates(novelty, k=3)
+        # Planner request tuning (timeouts/retries)
+        try:
+            _req_timeout = int(get("pipeline.planner.request_timeout", 180) or 180)
+        except Exception:
+            _req_timeout = 180
+        try:
+            _max_tries = int(get("pipeline.planner.request_retries", 4) or 4)
+        except Exception:
+            _max_tries = 4
+        # Log effective LLM configuration (for troubleshooting)
+        try:
+            eff_provider = str((get("llm.provider", LLM_PROVIDER) or LLM_PROVIDER)).lower()
+            eff_model = str((get("pipeline.planner.model", None) or get("llm.model", LLM_MODEL) or LLM_MODEL))
+            print(
+                f"[PLANNER] LLM config: provider={eff_provider}, model={eff_model}, url={LLM_CHAT_URL}, timeout={_req_timeout}s, retries={_max_tries}"
+            )
+        except Exception:
+            pass
 
         # PI draft
         pi_system = load_prompt("planner_pi_system") or (
@@ -438,6 +794,7 @@ def run_planning_session(novelty: Dict[str, Any]) -> Dict[str, Any]:
             "Use novelty_outline (problems/objectives/contributions/research_questions) and choose ONE novelty from novelty_candidates as the novelty_focus.\n"
             "Translate the chosen candidate's eval_plan/spec_hint into concrete tasks/steps that fit <=1 epoch and <=100 steps.\n"
             "Output MUST include ALL keys, each non-empty: objective, hypotheses, success_criteria (metric + delta vs baseline), datasets (name + path), baselines, novelty_focus, stopping_rules, tasks (name/why/steps), risks (risk/mitigation), assumptions, milestones.\n"
+            "STRICT success_criteria SHAPE: an ARRAY of OBJECTS, each {metric: string, delta_vs_baseline: number}. No 'primary_metric'/'secondary_metrics' maps. No string deltas.\n"
             "Metrics may include mAP@0.5, FP_per_image, precision@IoU0.5, IoU, Dice, AUC, ECE, or val_accuracy — pick those matching the novelty.\n"
             "Be concrete, specify thresholds, and avoid ambiguous phrasing.\n"
             "Self-check: validate keys/types/constraints; return only JSON."
@@ -451,8 +808,35 @@ def run_planning_session(novelty: Dict[str, Any]) -> Dict[str, Any]:
         append_jsonl(session_log, {"role": "PI_input", "system": pi_system, "user": json.loads(pi_user)})
         model = get("pipeline.planner.model", None)
         profile = get("pipeline.planner.llm", None)
-        pi = chat_json_cached(pi_system, pi_user, temperature=0.0, model=model, profile=profile)
+        def _omit_temp_for_gpt5() -> bool:
+            try:
+                prov = str((get("llm.provider", LLM_PROVIDER) or LLM_PROVIDER)).lower()
+                mod = str((model or get("llm.model", LLM_MODEL) or LLM_MODEL)).lower()
+                return prov == "openai" and (mod.startswith("gpt-5-") or mod == "gpt-5")
+            except Exception:
+                return False
+        try:
+            print(
+                f"[PLANNER] Calling LLM stage=PI (temp={'omit' if _omit_temp_for_gpt5() else '0.0'}) timeout={_req_timeout}s retries={_max_tries}"
+            )
+            if _omit_temp_for_gpt5():
+                pi = chat_json_cached(pi_system, pi_user, model=model, profile=profile, timeout=_req_timeout, max_tries=_max_tries)
+            else:
+                pi = chat_json_cached(pi_system, pi_user, temperature=0.0, model=model, profile=profile, timeout=_req_timeout, max_tries=_max_tries)
+        except LLMError as e:
+            print(f"[ERR] LLM error at stage=PI: {e}")
+            print("[HINT] Increase pipeline.planner.request_timeout or check network/API key. See config.yaml.")
+            raise
         append_jsonl(session_log, {"role": "PI", "content": pi})
+        # Normalize PI and log diff
+        try:
+            pi_raw = pi
+            pi = _normalize_plan_shape(pi)
+            append_jsonl(session_log, {"role": "PI_normalized", "content": pi})
+            sd = _shape_diff(pi_raw, pi)
+            append_jsonl(session_log, {"role": "shape_diff", "stage": "PI", "diff": sd})
+        except Exception:
+            pass
         if _progress:
             try:
                 print(
@@ -472,6 +856,7 @@ def run_planning_session(novelty: Dict[str, Any]) -> Dict[str, Any]:
             "You are the Engineer. Refine the PI plan into runnable specifications with exact parameters and safe ranges.\n"
             "Validate dataset paths, choose realistic metrics, ensure baselines are minimal, and convert the selected novelty candidate into short step-by-step tasks.\n"
             "Respect constraints (<=1 epoch, small steps). Return JSON with ALL keys present and non-empty: objective, hypotheses, success_criteria, datasets, baselines, novelty_focus, stopping_rules, tasks, risks, assumptions, milestones.\n"
+            "STRICT success_criteria SHAPE: an ARRAY of OBJECTS, each {metric: string, delta_vs_baseline: number}. No 'primary_metric'/'secondary_metrics'. Use 0.03 for +3%.\n"
             "Self-check: validate keys/types/constraints; return only JSON."
         )
         eng_user = json.dumps({
@@ -483,8 +868,28 @@ def run_planning_session(novelty: Dict[str, Any]) -> Dict[str, Any]:
         append_jsonl(session_log, {"role": "Engineer_input", "system": eng_system, "user": json.loads(eng_user)})
         model = get("pipeline.planner.model", None)
         profile = get("pipeline.planner.llm", None)
-        eng = chat_json_cached(eng_system, eng_user, temperature=0.0, model=model, profile=profile)
+        try:
+            print(
+                f"[PLANNER] Calling LLM stage=Engineer (temp={'omit' if _omit_temp_for_gpt5() else '0.0'}) timeout={_req_timeout}s retries={_max_tries}"
+            )
+            if _omit_temp_for_gpt5():
+                eng = chat_json_cached(eng_system, eng_user, model=model, profile=profile, timeout=_req_timeout, max_tries=_max_tries)
+            else:
+                eng = chat_json_cached(eng_system, eng_user, temperature=0.0, model=model, profile=profile, timeout=_req_timeout, max_tries=_max_tries)
+        except LLMError as e:
+            print(f"[ERR] LLM error at stage=Engineer: {e}")
+            print("[HINT] Increase pipeline.planner.request_timeout or reduce prompt size/personas to shorten calls.")
+            raise
         append_jsonl(session_log, {"role": "Engineer", "content": eng})
+        # Normalize Engineer and log diff
+        try:
+            eng_raw = eng
+            eng = _normalize_plan_shape(eng)
+            append_jsonl(session_log, {"role": "Engineer_normalized", "content": eng})
+            sd = _shape_diff(eng_raw, eng)
+            append_jsonl(session_log, {"role": "shape_diff", "stage": "Engineer", "diff": sd})
+        except Exception:
+            pass
         if _progress:
             try:
                 print(
@@ -504,6 +909,7 @@ def run_planning_session(novelty: Dict[str, Any]) -> Dict[str, Any]:
             "Ensure the novelty_focus corresponds to one candidate and tasks map to its eval_plan/spec_hint.\n"
             "Finalize a lean plan that fits the compute budget; keep thresholds and dataset paths explicit.\n"
             "Return final plan JSON with ALL keys present and non-empty: objective, hypotheses, success_criteria, datasets, baselines, novelty_focus, stopping_rules, tasks, risks, assumptions, milestones.\n"
+            "STRICT success_criteria SHAPE: an ARRAY of OBJECTS, each {metric: string, delta_vs_baseline: number}. No 'primary_metric'/'secondary_metrics'. Numeric deltas only.\n"
             "Self-check: validate keys/types/constraints; return only JSON."
         )
         rev_user = json.dumps({
@@ -515,7 +921,27 @@ def run_planning_session(novelty: Dict[str, Any]) -> Dict[str, Any]:
         append_jsonl(session_log, {"role": "Reviewer_input", "system": rev_system, "user": json.loads(rev_user)})
         model = get("pipeline.planner.model", None)
         profile = get("pipeline.planner.llm", None)
-        rev = chat_json_cached(rev_system, rev_user, temperature=0.0, model=model, profile=profile)
+        try:
+            print(
+                f"[PLANNER] Calling LLM stage=Reviewer (temp={'omit' if _omit_temp_for_gpt5() else '0.0'}) timeout={_req_timeout}s retries={_max_tries}"
+            )
+            if _omit_temp_for_gpt5():
+                rev = chat_json_cached(rev_system, rev_user, model=model, profile=profile, timeout=_req_timeout, max_tries=_max_tries)
+            else:
+                rev = chat_json_cached(rev_system, rev_user, temperature=0.0, model=model, profile=profile, timeout=_req_timeout, max_tries=_max_tries)
+        except LLMError as e:
+            print(f"[ERR] LLM error at stage=Reviewer: {e}")
+            print("[HINT] Increase pipeline.planner.request_timeout or re-run later to avoid transient rates/timeouts.")
+            raise
+        # Normalize Reviewer and log diff
+        try:
+            rev_raw = rev
+            rev = _normalize_plan_shape(rev)
+            append_jsonl(session_log, {"role": "Reviewer_normalized", "content": rev})
+            sd = _shape_diff(rev_raw, rev)
+            append_jsonl(session_log, {"role": "shape_diff", "stage": "Reviewer", "diff": sd})
+        except Exception:
+            pass
 
         # Strict validation warnings (no mutation here)
         def _warn_if_invalid(tag: str, obj: Any) -> None:
@@ -526,8 +952,11 @@ def run_planning_session(novelty: Dict[str, Any]) -> Dict[str, Any]:
                 print(f"[WARN] {tag} produced invalid plan shape: {e}")
 
         _warn_if_invalid("PI", pi)
+        _print_schema_errors("PI", pi, PLAN_SCHEMA)
         _warn_if_invalid("Engineer", eng)
+        _print_schema_errors("Engineer", eng, PLAN_SCHEMA)
         _warn_if_invalid("Reviewer", rev)
+        _print_schema_errors("Reviewer", rev, PLAN_SCHEMA)
         append_jsonl(session_log, {"role": "Reviewer", "content": rev})
         if _progress:
             try:
@@ -565,8 +994,15 @@ def run_planning_session(novelty: Dict[str, Any]) -> Dict[str, Any]:
             "assumptions": _carry("assumptions", []),
             "milestones": _carry("milestones", []),
         }
-        # Strict validation of the final composed plan
-        validate_json(final, PLAN_SCHEMA, "final_plan")
+        # Normalize once more before strict validation
+        final = _normalize_plan_shape(final)
+        # Strict validation of the final composed plan (with diagnostics)
+        try:
+            validate_json(final, PLAN_SCHEMA, "final_plan")
+        except Exception as e:
+            print(f"[ERR] final_plan schema violation: {e}")
+            _print_schema_errors("final_plan", final, PLAN_SCHEMA)
+            raise
         # Write a human-readable transcript for transparency
         try:
             parts = [
