@@ -67,7 +67,9 @@ def _expand_one_idea(idea: str, goal: str) -> Dict[str, Any]:
             "Spec_hint should be an actionable one-liner to seed experiments.",
         ],
     }
-    js = chat_json(system, json.dumps(user, ensure_ascii=False), temperature=0.0)
+    model = get("pipeline.idea_blueprints.model", None)
+    profile = get("pipeline.idea_blueprints.llm", None)
+    js = chat_json(system, json.dumps(user, ensure_ascii=False), temperature=0.0, model=model, profile=profile)
     # Ensure required keys and defaults
     bp = {
         "idea": js.get("idea") or idea,
@@ -145,4 +147,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

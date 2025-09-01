@@ -21,6 +21,7 @@ import importlib.util
 import sys
 
 from utils.llm_utils import chat_text_cached, LLMError
+from lab.config import get
 
 
 GEN_PATH = Path(__file__).parent / "generated_train.py"
@@ -189,10 +190,12 @@ def run_codegen_editor(description: str, extra_context: Optional[str] = None, ma
         if err_msg:
             prompt += f"\nPrevious error: {err_msg}\nPlease fix using EDIT or REPLACE."
         try:
+            model = get("pipeline.codegen.editor.model", None) or get("pipeline.codegen.model", None)
+            profile = get("pipeline.codegen.editor.llm", None) or get("pipeline.codegen.llm", None)
             text = chat_text_cached([
                 {"role": "system", "content": sys_prompt},
                 {"role": "user", "content": prompt},
-            ], temperature=0.2)
+            ], temperature=0.2, model=model, profile=profile)
         except LLMError as exc:
             # Stop early; caller may fallback to deterministic behavior
             return False

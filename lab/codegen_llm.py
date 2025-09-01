@@ -19,6 +19,7 @@ from pathlib import Path
 import re
 
 from utils.llm_utils import chat_text_cached, LLMError
+from lab.config import get
 
 
 _GEN_PATH = Path(__file__).parent / "generated_aug.py"
@@ -88,10 +89,12 @@ def write_generated_aug_from_llm(description: str, extra_context: Optional[str] 
     )
 
     try:
+        model = get("pipeline.codegen.model", None)
+        profile = get("pipeline.codegen.llm", None)
         text = chat_text_cached([
             {"role": "system", "content": sys_prompt},
             {"role": "user", "content": user_prompt},
-        ], temperature=0.2)
+        ], temperature=0.2, model=model, profile=profile)
     except LLMError:
         return None
     blocks = _extract_code_blocks(text)

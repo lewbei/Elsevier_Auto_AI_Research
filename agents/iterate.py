@@ -136,7 +136,9 @@ def propose_baseline_and_novelty(novelty: Dict[str, Any]) -> Tuple[Dict[str, Any
             }
         }
     }
-    js = chat_json_cached(system, json.dumps(user_payload, ensure_ascii=False), temperature=0.2)
+    model = get("pipeline.iterate.model", None)
+    profile = get("pipeline.iterate.llm", None)
+    js = chat_json_cached(system, json.dumps(user_payload, ensure_ascii=False), temperature=0.2, model=model, profile=profile)
     baseline = js.get("baseline") or {}
     novelty_spec = js.get("novelty") or {}
     ablation = js.get("ablation") or {}
@@ -280,7 +282,9 @@ def engineer_refine_specs(
             "ablation": {}
         }
     }
-    js = chat_json_cached(system, json.dumps(user_payload, ensure_ascii=False), temperature=0.2)
+    model = get("pipeline.iterate.model", None)
+    profile = get("pipeline.iterate.llm", None)
+    js = chat_json_cached(system, json.dumps(user_payload, ensure_ascii=False), temperature=0.2, model=model, profile=profile)
     b = verify_and_fix_spec(js.get("baseline") or baseline)
     n = verify_and_fix_spec(js.get("novelty") or novelty_spec)
     a = verify_and_fix_spec(js.get("ablation") or ablation)
@@ -654,7 +658,9 @@ def _review_iteration(results: List[Dict[str, Any]], decision: Dict[str, Any], n
         },
     }
     try:
-        js = chat_json_cached(system, json.dumps(user_payload, ensure_ascii=False), temperature=0.0)
+        model = get("pipeline.iterate.model", None)
+        profile = get("pipeline.iterate.llm", None)
+        js = chat_json_cached(system, json.dumps(user_payload, ensure_ascii=False), temperature=0.0, model=model, profile=profile)
     except LLMError as exc:
         return {
             "summary": f"LLM error: {exc}",

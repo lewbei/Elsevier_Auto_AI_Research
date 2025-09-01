@@ -74,10 +74,13 @@ def group_novelty_and_ideas(summaries: List[Dict[str, Any]], persona_notes: List
     goal = str(get("project.goal", "your goal") or "your goal")
     system = (
         "You are a meticulous panel moderator coordinating multiple expert personas to synthesize novelty across papers.\n"
-        "Given inputs of per-paper novelty claims/methods/limitations, perform: (a) robust clustering into 3–6 coherent THEMES; (b) a compact SUMMARY for each theme capturing common ideas, divergences, and caveats; (c) name a few representative papers (by title strings) per theme; and (d) propose 5–8 NEW RESEARCH IDEAS that combine, extend, or challenge these themes.\n"
+        "Tasks: (a) robustly CLUSTER into 3–6 THEMES; (b) write a compact SUMMARY per theme with divergences/caveats and 2–4 representative paper titles; (c) propose 5–8 NEW RESEARCH IDEAS.\n"
         f"Orient the synthesis toward the goal: {goal}.\n"
-        "Guidelines: avoid superficial grouping, prefer principle-based clusters, reflect limitations/risks, avoid duplication across ideas. Return strictly JSON.\n"
-        "Self-check: Before responding, validate keys/types per output_schema; fix mismatches and return JSON only."
+        "For NEW RESEARCH IDEAS, return BOTH a short list (new_ideas) AND a detailed, numbered list (new_ideas_detailed) with the following fields for each idea:\n"
+        "id (1-based string), title (<=100 chars), novelty_kind [architecture|training_objective|data|evaluation|augmentation|optimizer|other], why_novel (<=240 chars), spec_hint (<=240 chars minimal actionable change), method (<=280 chars concrete method/recipe), risks (<=240 chars), eval_plan (list of <=6 short steps), compute_budget (<=60 chars).\n"
+        "If YOLO/detection-related, include yolo fields inside method/spec_hint where appropriate (yolo_version, backbone, img_size, anchors, conf_thresh, iou_thresh, nms, task_adapt).\n"
+        "Avoid duplication across ideas; keep ideas feasible under tight budgets. Return strictly JSON.\n"
+        "Self-check: validate keys/types per output_schema; fix mismatches and return JSON only."
     )
     user_payload = {
         "papers": items,
@@ -92,9 +95,24 @@ def group_novelty_and_ideas(summaries: List[Dict[str, Any]], persona_notes: List
                 }
             ],
             "new_ideas": ["string"],
+            "new_ideas_detailed": [
+                {
+                    "id": "string",
+                    "title": "string",
+                    "novelty_kind": "string",
+                    "why_novel": "string",
+                    "spec_hint": "string",
+                    "method": "string",
+                    "risks": "string",
+                    "eval_plan": ["string"],
+                    "compute_budget": "string"
+                }
+            ]
         }
     }
-    js = chat_json(system, json.dumps(user_payload, ensure_ascii=False), temperature=0.2)
+    model = get("pipeline.novelty.model", None)
+    profile = get("pipeline.novelty.llm", None)
+    js = chat_json(system, json.dumps(user_payload, ensure_ascii=False), temperature=0.2, model=model, profile=profile)
     # light shape enforcement
     themes = js.get("themes") or []
     if not isinstance(themes, list):
@@ -102,7 +120,38 @@ def group_novelty_and_ideas(summaries: List[Dict[str, Any]], persona_notes: List
     new_ideas = js.get("new_ideas") or []
     if not isinstance(new_ideas, list):
         new_ideas = []
-    return {"themes": themes, "new_ideas": new_ideas}
+    # Detailed ideas (objects)
+    di = js.get("new_ideas_detailed") or []
+    if not isinstance(di, list):
+        di = []
+    fixed_di: List[Dict[str, Any]] = []
+    # Allow disable via config/env
+    detailed_enable = True
+    try:
+        detailed_enable = bool(get("pipeline.novelty.detailed_ideas", True))
+        env = str(os.getenv("NOVELTY_DETAILED", "")).lower()
+        if env in {"0", "false", "no", "off"}:
+            detailed_enable = False
+        elif env in {"1", "true", "yes", "on"}:
+            detailed_enable = True
+    except Exception:
+        detailed_enable = True
+    if detailed_enable:
+        for idx, item in enumerate(di, start=1):
+            if not isinstance(item, dict):
+                continue
+            fixed_di.append({
+                "id": str(item.get("id") or idx),
+                "title": str(item.get("title") or "").strip(),
+                "novelty_kind": str(item.get("novelty_kind") or "").strip(),
+                "why_novel": str(item.get("why_novel") or "").strip(),
+                "spec_hint": str(item.get("spec_hint") or "").strip(),
+                "method": str(item.get("method") or "").strip(),
+                "risks": str(item.get("risks") or "").strip(),
+                "eval_plan": [str(x) for x in (item.get("eval_plan") or []) if str(x).strip()],
+                "compute_budget": str(item.get("compute_budget") or "").strip(),
+            })
+    return {"themes": themes, "new_ideas": new_ideas, "new_ideas_detailed": fixed_di}
 
 
 def derive_research_outline(themes_and_ideas: Dict[str, Any], citations: List[Dict[str, str]], persona_notes: List[str] | None = None) -> Dict[str, Any]:
@@ -132,7 +181,9 @@ def derive_research_outline(themes_and_ideas: Dict[str, Any], citations: List[Di
             "research_questions": ["string"],
         }
     }
-    js = chat_json(system, json.dumps(user_payload, ensure_ascii=False), temperature=0.0)
+    model = get("pipeline.novelty.model", None)
+    profile = get("pipeline.novelty.llm", None)
+    js = chat_json(system, json.dumps(user_payload, ensure_ascii=False), temperature=0.0, model=model, profile=profile)
     def _as_list(x):
         if isinstance(x, list):
             return [str(i) for i in x]
@@ -497,7 +548,9 @@ def _uniqueness_reflection(panel: Dict[str, Any], persona_notes: List[str] | Non
         "Avoid generic augmentation/hparam tropes; prefer combinations, constraints-aware designs, or measurement/label innovations. Return JSON."
     )
     try:
-        js = chat_json(system, json.dumps(payload, ensure_ascii=False), temperature=0.2)
+        model = get("pipeline.novelty.model", None)
+        profile = get("pipeline.novelty.llm", None)
+        js = chat_json(system, json.dumps(payload, ensure_ascii=False), temperature=0.2, model=model, profile=profile)
     except LLMError:
         return {"unique_ideas": [], "critique": []}
     # light shape
@@ -573,6 +626,7 @@ def main() -> None:
         "num_papers": len(summaries),
         "themes": panel.get("themes", []),
         "new_ideas": panel.get("new_ideas", []),
+        "novelty_ideas": panel.get("new_ideas_detailed", []),
         "unique_ideas": uniq.get("unique_ideas", []),
         "problems": outline.get("problems", []),
         "objectives": outline.get("objectives", []),
@@ -580,6 +634,18 @@ def main() -> None:
         "research_questions": outline.get("research_questions", []),
         "citations": outline.get("citations", []),
     }
+    # Optional: produce an ideas-only report
+    try:
+        only_ideas = bool(get("pipeline.novelty.only_ideas", False))
+        env_only = str(os.getenv("NOVELTY_ONLY_IDEAS", "")).lower()
+        if env_only in {"1", "true", "yes", "on"}:
+            only_ideas = True
+        elif env_only in {"0", "false", "no", "off"}:
+            pass
+    except Exception:
+        only_ideas = False
+    if only_ideas:
+        final = {"novelty_ideas": final.get("novelty_ideas", [])}
     with open(REPORT_PATH, "w", encoding="utf-8") as f:
         json.dump(final, f, ensure_ascii=False, indent=2)
     if is_verbose():

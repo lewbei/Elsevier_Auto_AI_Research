@@ -38,24 +38,47 @@ research:
   num_contributions: 2
   num_questions: 1
 
+# Global LLM profiles and default selection
+llm:
+  # Aliases map to providers via utils.llm_utils
+  default: gpt-5-mini   # OpenAI GPT‑5 mini
+  custom: deepseek      # DeepSeek chat
+  use: default          # fallback profile when per-agent is omitted
+  # Optional streaming toggle for chat_text (unsupported for JSON outputs)
+  stream: false
+
 # Pipeline controls (YAML-first). All are optional.
 pipeline:
   # Skip stages automatically without CLI or env flags
   skip:
     find_papers: true
-    summaries: false
+    summaries: true
     novelty: false
     idea_blueprints: false
     planner: false
     iterate: false
     lit_review: true
+    interactive: true
   # Number of iterate cycles (fallback to 2 if unset)
   max_iters: 2
   # Write paper draft at the end
   write_paper: false
   # Re-run stages even if artifacts already exist
   always_fresh: true
+  # Summarize agent configuration
+  summarize:
+    llm: default          # profile alias
+    max_pages: 0          # 0 = no page limit
+    max_chars: 0          # 0 = no character limit
+    pass1_chunk: 20000    # chars per chunk when chunking
+    progress: true        # print high-level progress lines
+    detail: false         # print timing/details
+    save_raw: false       # save intermediate JSON files (*.pass1.json, *.merged.json, ...)
+    force_chunk: false    # force chunking instead of full-text pass
+
+  # Novelty agent configuration
   novelty:
+    llm: default
     personas:
       enable: true
       steps: 4
@@ -65,18 +88,39 @@ pipeline:
         rounds: 2
         roles: [PhD, PhD, Professor, Professor, Postdoc, Postdoc]
         until_agree: true
-        # Optional absolute cap for safety in long debates; set 0 for auto-cap
-        # max_rounds: 20
+        # max_rounds: 0  # 0 → auto-cap
     uniqueness:
       enable: true
+
+  # Planner agent configuration
   planner:
+    llm: default
     personas:
       enable: true
+
+  # Iterate agent configuration
+  iterate:
+    llm: default
+    personas:
+      enable: true    # optional persona notes for iterate (off by default)
+
+  # Code generation controls
+  codegen:
+    enable: true      # LLM-driven augmentation module generation
+    llm: default
+    editor:
+      enable: true    # Optional REPLACE/EDIT training hooks generation
+      llm: default
+
+  # Idea blueprints agent
   idea_blueprints:
+    llm: default
     top_k: 3
-  write_paper:
-    llm:
-      enable: true
+
+  # Optional interactive stage
+  interactive:
+    enable: false
+
   # Human-in-the-loop confirmation gates
   hitl:
     confirm: false

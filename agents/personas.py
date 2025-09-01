@@ -11,6 +11,7 @@ from typing import Dict, List, Optional
 
 from lab.config import get
 from utils.llm_utils import chat_text_cached, LLMError
+from utils.llm_utils import chat_text_cached, LLMError
 
 
 @dataclass
@@ -83,7 +84,9 @@ def respond(persona: Persona, history: List[Dict[str, str]], user: str, temperat
     msgs: List[Dict[str, str]] = [{"role": "system", "content": persona.system}]
     msgs.extend(history)
     msgs.append({"role": "user", "content": user})
-    return chat_text_cached(msgs, temperature=temperature)
+    model = get("pipeline.personas.model", None)
+    profile = get("pipeline.personas.llm", None)
+    return chat_text_cached(msgs, temperature=temperature, model=model, profile=profile)
 
 
 class DialogueManager:

@@ -61,7 +61,8 @@ def build_plan(novelty: Dict[str, Any]) -> Dict[str, Any]:
             "milestones": ["string"],
         }
     }
-    js = chat_json_cached(system, json.dumps(user_payload, ensure_ascii=False), temperature=0.0)
+    profile = get("pipeline.planner.llm", None)
+    js = chat_json_cached(system, json.dumps(user_payload, ensure_ascii=False), temperature=0.0, profile=profile)
 
     # Minimal shape enforcement
     def _as_list(x):
@@ -152,7 +153,9 @@ def run_planning_session(novelty: Dict[str, Any]) -> Dict[str, Any]:
         )
         pi_user = json.dumps({"novelty_report": novelty, "persona_notes": persona_notes}, ensure_ascii=False)
         append_jsonl(session_log, {"role": "PI_input", "system": pi_system, "user": json.loads(pi_user)})
-        pi = chat_json_cached(pi_system, pi_user, temperature=0.0)
+        model = get("pipeline.planner.model", None)
+        profile = get("pipeline.planner.llm", None)
+        pi = chat_json_cached(pi_system, pi_user, temperature=0.0, model=model, profile=profile)
         append_jsonl(session_log, {"role": "PI", "content": pi})
 
         # Engineer refinement
@@ -164,7 +167,9 @@ def run_planning_session(novelty: Dict[str, Any]) -> Dict[str, Any]:
         )
         eng_user = json.dumps({"pi_plan": pi, "persona_notes": persona_notes}, ensure_ascii=False)
         append_jsonl(session_log, {"role": "Engineer_input", "system": eng_system, "user": json.loads(eng_user)})
-        eng = chat_json_cached(eng_system, eng_user, temperature=0.0)
+        model = get("pipeline.planner.model", None)
+        profile = get("pipeline.planner.llm", None)
+        eng = chat_json_cached(eng_system, eng_user, temperature=0.0, model=model, profile=profile)
         append_jsonl(session_log, {"role": "Engineer", "content": eng})
 
         # Reviewer check
@@ -176,7 +181,9 @@ def run_planning_session(novelty: Dict[str, Any]) -> Dict[str, Any]:
         )
         rev_user = json.dumps({"engineer_plan": eng, "persona_notes": persona_notes}, ensure_ascii=False)
         append_jsonl(session_log, {"role": "Reviewer_input", "system": rev_system, "user": json.loads(rev_user)})
-        rev = chat_json_cached(rev_system, rev_user, temperature=0.0)
+        model = get("pipeline.planner.model", None)
+        profile = get("pipeline.planner.llm", None)
+        rev = chat_json_cached(rev_system, rev_user, temperature=0.0, model=model, profile=profile)
         append_jsonl(session_log, {"role": "Reviewer", "content": rev})
 
         # Shape to our expected fields
