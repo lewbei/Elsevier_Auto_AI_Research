@@ -58,7 +58,7 @@ pipeline:
     planner: false
     iterate: false
     lit_review: true
-    interactive: true
+    interactive: false
   # Number of iterate cycles (fallback to 2 if unset)
   max_iters: 2
   # Write paper draft at the end

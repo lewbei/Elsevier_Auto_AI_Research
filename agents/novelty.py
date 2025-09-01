@@ -229,7 +229,7 @@ def _persona_discussion(summaries: List[Dict[str, Any]]) -> List[str]:
         dm.post(
             "User",
             (
-                "We will discuss novelty themes across papers and propose fresh, actionable ideas under tight compute.\n"
+                "We will discuss novelty themes across papers and propose novel, actionable ideas under tight compute.\n"
                 "Provide role-aware, concrete observations: what clusters emerge, what is missing, risks, and specific crossovers to try."
             ),
         )
@@ -263,7 +263,7 @@ def _persona_discussion(summaries: List[Dict[str, Any]]) -> List[str]:
         if print_flag:
             try:
                 print(f"[NOVELTY CHAT] Personas discussion enabled (steps={steps})")
-                print("[User] We will discuss novelty themes across papers and propose fresh ideas.")
+                print("[User] We will discuss novelty themes across papers and propose novel ideas.")
             except Exception:
                 pass
 
