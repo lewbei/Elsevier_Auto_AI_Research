@@ -53,6 +53,7 @@ def _llm_pass1_extraction(
                 "discussion": ["string"],
                 "conclusion": ["string"],
             },
+            "paper_type": "review|research",
             "datasets": ["string"],
             "metrics": ["string"],
             "results_numbers": [{"metric": "string", "value": "string", "dataset": "string", "split": "string", "baseline": "string", "improvement": "string"}],
@@ -66,7 +67,20 @@ def _llm_pass1_extraction(
             "captions": {"tables": ["string"], "figures": ["string"]},
             "coverage_report": {"missing": ["string"], "notes": ["string"]},
             "related_work": [
-                {"title": "string", "citation": "string", "venue": "string", "year": "string", "doi": "string", "url": "string", "relation": "string"}
+                {
+                    "title": "string",
+                    "citation": "string",
+                    "venue": "string",
+                    "year": "string",
+                    "doi": "string",
+                    "url": "string",
+                    "relation": "string",
+                    "method_summary": "string",
+                    "methods": ["string"],
+                    "datasets": ["string"],
+                    "metrics": ["string"],
+                    "results_notes": ["string"]
+                }
             ],
         },
         "rules": [
@@ -154,6 +168,7 @@ def _llm_pass3_finalize_schema(merged_pack: Dict[str, Any], *, model: Optional[s
         "year": "string",
         "doi": "string",
         "url": "string",
+        "paper_type": "review|research",
         "problem": "string",
         "background": ["string"],
         "research_questions": ["string"],
@@ -184,7 +199,20 @@ def _llm_pass3_finalize_schema(merged_pack: Dict[str, Any], *, model: Optional[s
         "keywords": ["string"],
         "confidence": "0.0-1.0 float as string",
         "related_work": [
-            {"title": "string", "citation": "string", "venue": "string", "year": "string", "doi": "string", "url": "string", "relation": "string"}
+            {
+                "title": "string",
+                "citation": "string",
+                "venue": "string",
+                "year": "string",
+                "doi": "string",
+                "url": "string",
+                "relation": "string",
+                "method_summary": "string",
+                "methods": ["string"],
+                "datasets": ["string"],
+                "metrics": ["string"],
+                "results_notes": ["string"]
+            }
         ],
     }
     user = {
@@ -192,6 +220,7 @@ def _llm_pass3_finalize_schema(merged_pack: Dict[str, Any], *, model: Optional[s
         "target_schema": target_schema,
         "normalization_rules": [
             "Normalize model/dataset/metric names to short common forms.",
+            "Classify paper_type as 'review' only if the text clearly indicates survey/review/systematic review/meta-analysis; otherwise 'research'.",
             "Compute improvement if both baseline and new value exist; else ''.",
             "Do not invent DOIs/URLs/venues; leave empty if not explicit in the text.",
             "Do not invent anything",
@@ -204,7 +233,7 @@ def _llm_pass3_finalize_schema(merged_pack: Dict[str, Any], *, model: Optional[s
             "results_numbers rows should use normalized fields: metric, value, dataset, split (train|val|test), baseline, improvement; prefer per-model rows when present.",
             "If dataset_details[] exists, ensure each object has keys name, size, splits, preprocessing, notes (empty string when unknown). If none exist but datasets[] is present, add one combined entry with empty keys except name.",
             "If the paper uses YOLO/detection, include YOLO-specific strings within architecture[]/training_procedure[] when present: yolo_version:, backbone:, img_size:, anchors:, conf_thresh:, iou_thresh:, nms:, task_adapt.",
-            "For related_work[], keep ≤12 entries; dedupe by DOI/title; include a short 'citation' string and optional DOI/URL when explicitly present; 'relation' should briefly explain the connection (baseline, similar method, prior SOTA)."
+            "For related_work[], keep ≤12 entries; dedupe by DOI/title; include a short 'citation' string and optional DOI/URL when explicitly present; 'relation' should briefly explain the connection (baseline, similar method, prior SOTA). For each item include method_summary (<=200 chars) and, when stated in the text, methods[], datasets[], metrics[], and results_notes[]."
         ],
     }
     kwargs: Dict[str, Any] = {}
@@ -328,7 +357,20 @@ def summarize_paper(
             "keywords": ["string"],
             "confidence": "0.0-1.0 float as string",
             "related_work": [
-                {"title": "string", "citation": "string", "venue": "string", "year": "string", "doi": "string", "url": "string", "relation": "string"}
+                {
+                    "title": "string",
+                    "citation": "string",
+                    "venue": "string",
+                    "year": "string",
+                    "doi": "string",
+                    "url": "string",
+                    "relation": "string",
+                    "method_summary": "string",
+                    "methods": ["string"],
+                    "datasets": ["string"],
+                    "metrics": ["string"],
+                    "results_notes": ["string"]
+                }
             ]
         },
         "instructions": (
@@ -338,7 +380,7 @@ def summarize_paper(
             "Include augmentation lines as 'aug: ...' with magnitudes when present. "
             "Metrics MUST include 'accuracy' and 'auc (macro|micro|ovr|unspecified)' plus precision/recall/f1 with averaging tags (or '(unspecified)' if not stated), and 'confusion_matrix'. "
             "Ensure dataset_details[] objects include keys: name, size, splits, preprocessing, notes (use '' when unknown)."
-            " Extract up to 12 related_work items from the paper text (References and in-text comparisons). Each should include a concise 'citation' string and optional DOI/URL if explicitly present."
+            " Extract up to 12 related_work items from the paper text (References and in-text comparisons). Each should include a concise 'citation' string and optional DOI/URL if explicitly present. Also include method_summary and, when stated, methods[], datasets[], metrics[], results_notes[] that characterize how that prior work approaches the problem."
         ),
     }
     # All‑LLM 3‑pass flow with deterministic chunking (no offline fallbacks)
@@ -404,6 +446,7 @@ def summarize_paper(
             "type": "object",
             "properties": {
                 "title": {"type": "string"},
+                "paper_type": {"type": "string"},
                 "authors": {"type": "array", "items": {"type": "string"}},
                 "venue": {"type": "string"},
                 "year": {"type": "string"},
@@ -478,33 +521,35 @@ def summarize_paper(
         return out
 
     def _metrics_with_required(metrics: List[str], rn: List[Dict[str, Any]]) -> List[str]:
-        mset = {str(m).strip().lower() for m in metrics}
+        """Preserve existing metrics and repair AUC mode tags without dropping valid entries.
+
+        - Do not remove pre-existing metrics with explicit modes (e.g., 'auc (macro)').
+        - If an AUC entry lacks a mode, replace that exact entry with 'auc (unspecified)'.
+        - Optionally add 'accuracy' if missing (kept for backward-compat).
+        - Optionally add a single 'auc (unspecified)' only when there is evidence of AUC in results_numbers and no AUC in metrics at all.
+        """
         out = list(metrics)
+        mset = {str(m).strip().lower() for m in out}
+
+        # Ensure accuracy present (backward-compat; can be removed if strict non-invention is desired)
         if "accuracy" not in mset:
             out.append("accuracy")
-        # AUC with explicit mode
-        auc_modes = [m for m in metrics if str(m).strip().lower().startswith("auc")]
-        if not auc_modes:
-            # infer from results_numbers if any auc row exists
-            has_auc_rn = any(str(r.get("metric") or "").lower().startswith("auc") for r in (rn or []) if isinstance(r, dict))
-            out.append("auc (unspecified)" if has_auc_rn else "auc (unspecified)")
-        else:
-            # ensure mode tag present
-            fixed = []
-            for m in auc_modes:
-                s = str(m)
-                if "(" not in s:
-                    fixed.append("auc (unspecified)")
-            out = [mm for mm in out if str(mm).strip().lower() not in {str(x).strip().lower() for x in auc_modes}] + fixed
-        # precision/recall/f1 with averaging tag (best-effort)
-        if not any(str(m).strip().lower().startswith("precision") for m in out):
-            out.append("precision (unspecified)")
-        if not any(str(m).strip().lower().startswith("recall") for m in out):
-            out.append("recall (unspecified)")
-        if not any(str(m).strip().lower().startswith("f1") for m in out):
-            out.append("f1 (unspecified)")
-        if not any(str(m).strip().lower() == "confusion_matrix" for m in out):
-            out.append("confusion_matrix")
+            mset.add("accuracy")
+
+        # Repair AUC entries missing a mode; do not drop correctly formed ones
+        replaced_any = False
+        for idx, m in enumerate(list(out)):
+            s = str(m).strip()
+            if s.lower().startswith("auc") and "(" not in s:
+                out[idx] = "auc (unspecified)"
+                replaced_any = True
+
+        # If there is no AUC in metrics at all, but results_numbers contain AUC rows, add one generic entry
+        has_auc_metric = any(str(m).strip().lower().startswith("auc") for m in out)
+        has_auc_rn = any(str((r.get("metric") or "")).lower().startswith("auc") for r in (rn or []) if isinstance(r, dict))
+        if not has_auc_metric and has_auc_rn:
+            out.append("auc (unspecified)")
+
         return out
 
     enforce_required = True
@@ -525,10 +570,7 @@ def summarize_paper(
         ]
         js["hyperparameters"] = _ensure_kv_presence(hp_lines, hp_required)
 
-        # augmentations presence: if none present in either, add a generic placeholder
-        has_aug = any(str(x).strip().lower().startswith("aug:") for x in js["training_procedure"] + _ensure_list(js.get("methods")))
-        if not has_aug:
-            js["training_procedure"].append("aug: ")
+        # Do not inject placeholder augmentations; keep only what the model returned
 
         # metrics enforcement
         js["metrics"] = _metrics_with_required(_ensure_list(js.get("metrics")), js.get("results_numbers") or [])
@@ -555,6 +597,7 @@ def summarize_paper(
     # Build a detailed, backward-compatible summary object with correct types
     out: Dict[str, Any] = {
         "title": _as_str(js.get("title") or title_hint),
+        "paper_type": _as_str(js.get("paper_type")),
         "problem": _as_str(js.get("problem")),
         "methods": _as_list(js.get("methods")),
         "datasets": _as_list(js.get("datasets")),
@@ -588,8 +631,8 @@ def summarize_paper(
     out["resources"] = _as_dict(js.get("resources"))
 
     # Related work normalization (list of objects with citation fields)
-    def _fix_related_work(x: Any) -> List[Dict[str, str]]:
-        items: List[Dict[str, str]] = []
+    def _fix_related_work(x: Any) -> List[Dict[str, Any]]:
+        items: List[Dict[str, Any]] = []
         if isinstance(x, list):
             for it in x:
                 if isinstance(it, dict):
@@ -601,6 +644,11 @@ def summarize_paper(
                         "doi": _as_str(it.get("doi")),
                         "url": _as_str(it.get("url")),
                         "relation": _as_str(it.get("relation")),
+                        "method_summary": _as_str(it.get("method_summary")),
+                        "methods": _as_list(it.get("methods")),
+                        "datasets": _as_list(it.get("datasets")),
+                        "metrics": _as_list(it.get("metrics")),
+                        "results_notes": _as_list(it.get("results_notes")),
                     })
                 else:
                     s = _as_str(it)
@@ -613,9 +661,50 @@ def summarize_paper(
                             "doi": "",
                             "url": "",
                             "relation": "",
+                            "method_summary": "",
+                            "methods": [],
+                            "datasets": [],
+                            "metrics": [],
+                            "results_notes": [],
                         })
         return items
     out["related_work"] = _fix_related_work(js.get("related_work"))
+
+    # Heuristic fallback for paper_type when missing
+    def _infer_paper_type(title: str, background: List[str]) -> str:
+        t = (title or "").lower()
+        if any(k in t for k in ["review", "survey", "systematic", "meta-analysis", "bibliometric"]):
+            return "review"
+        bg = " ".join(background or []).lower()
+        if any(k in bg for k in ["this review", "we review", "survey of", "systematic review", "meta-analysis"]):
+            return "review"
+        return "research"
+    if not out.get("paper_type"):
+        out["paper_type"] = _infer_paper_type(out.get("title", ""), out.get("background", []))
+
+    # Optional: fill missing values with a clear note instead of blanks
+    def _fill_not_mentioned(obj: Any) -> Any:
+        note = "not mentioned in the paper"
+        if isinstance(obj, dict):
+            return {k: _fill_not_mentioned(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            if not obj:
+                return [note]
+            return [_fill_not_mentioned(v) for v in obj]
+        if isinstance(obj, str):
+            return obj if obj.strip() else note
+        return obj
+
+    try:
+        from lab.config import get_bool as _get_bool
+        fill_missing = bool(_get_bool("pipeline.summarize.fill_not_mentioned", True))
+    except Exception:
+        fill_missing = True
+    if fill_missing:
+        # Avoid overriding title with note; handle others
+        title_val = out.get("title", "")
+        out = _fill_not_mentioned(out)
+        out["title"] = title_val if str(title_val).strip() else out["title"]
 
     # Completeness score (light)
     checks = [bool(out.get("title")), bool(out.get("problem")), bool(out.get("methods")), bool(out.get("datasets")), bool(out.get("results"))]

@@ -135,8 +135,9 @@ def main() -> None:
     try:
         review = _build_llm_review(items)
     except LLMError as exc:
-        print(f"[WARN] LLM not available or failed ({exc}); using offline review.")
-        review = _build_offline_review(items)
+        # No offline fallback per project policy
+        print(f"[ERR] LLM failed for lit_review ({exc}); skipping lit_review (no offline fallback).")
+        return
 
     OUT_PATH.write_text(review, encoding="utf-8")
     print(review)

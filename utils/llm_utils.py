@@ -312,11 +312,19 @@ def chat_json(system: str, user: str, *, temperature: float = 0.0, model: Option
     if not _is_gpt5(provider, use_model):
         payload["temperature"] = temperature
 
+    # Optional streaming for live token output (best-effort)
+    stream_enabled = get_bool("llm.stream", False) or (str(os.getenv("LLM_STREAM", "")).lower() in {"1", "true", "yes", "on"})
+    if stream_enabled:
+        payload["stream"] = True
+
     last_err = None
     delay = 2
     for attempt in range(1, max_tries + 1):
         try:
-            r = requests.post(chat_url, headers=_headers(provider, api_key), json=payload, timeout=timeout)
+            if stream_enabled:
+                r = requests.post(chat_url, headers=_headers(provider, api_key), json=payload, timeout=timeout, stream=True)
+            else:
+                r = requests.post(chat_url, headers=_headers(provider, api_key), json=payload, timeout=timeout)
         except requests.RequestException as exc:
             last_err = exc
             if attempt == max_tries:
@@ -327,20 +335,57 @@ def chat_json(system: str, user: str, *, temperature: float = 0.0, model: Option
 
         if r.status_code == 200:
             try:
-                data = r.json()
-                content = data["choices"][0]["message"]["content"]
-                js = json.loads(content)
-                try:
-                    usage = _extract_usage_from_response(data)
-                    key = _hash_payload("chat_json", payload)
-                    _record_usage("chat_json", payload, usage, cache_hit=False, cache_key=key)
-                except Exception:
-                    pass
-                try:
-                    _llm_log("chat_json", payload, js)
-                except Exception:
-                    pass
-                return js
+                if stream_enabled:
+                    full_text = ""
+                    for line in r.iter_lines(decode_unicode=True):
+                        if not line:
+                            continue
+                        if line.startswith(":"):
+                            continue
+                        if line.startswith("data:"):
+                            chunk = line[len("data:"):].strip()
+                            if chunk == "[DONE]":
+                                break
+                            try:
+                                js_line = json.loads(chunk)
+                                delta = js_line.get("choices", [{}])[0].get("delta", {})
+                                token = delta.get("content") or ""
+                                if token:
+                                    full_text += token
+                                    try:
+                                        print(token, end="", flush=True)
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                continue
+                    try:
+                        print()
+                    except Exception:
+                        pass
+                    try:
+                        js = json.loads(full_text)
+                    except Exception as exc:
+                        raise LLMError(f"LLM stream parse error: {exc}")
+                    try:
+                        _llm_log("chat_json_stream", payload, js)
+                    except Exception:
+                        pass
+                    return js
+                else:
+                    data = r.json()
+                    content = data["choices"][0]["message"]["content"]
+                    js = json.loads(content)
+                    try:
+                        usage = _extract_usage_from_response(data)
+                        key = _hash_payload("chat_json", payload)
+                        _record_usage("chat_json", payload, usage, cache_hit=False, cache_key=key)
+                    except Exception:
+                        pass
+                    try:
+                        _llm_log("chat_json", payload, js)
+                    except Exception:
+                        pass
+                    return js
             except Exception as exc:
                 raise LLMError(f"LLM response parse error: {exc}")
 

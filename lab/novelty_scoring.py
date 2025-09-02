@@ -4,6 +4,7 @@ import os
 import re
 import pathlib
 from typing import Dict, Any, List
+import difflib
 
 DATA_DIR = pathlib.Path("data")
 SCORES_PATH = DATA_DIR / "idea_scores.jsonl"
@@ -92,8 +93,43 @@ def score_and_filter_ideas(
             )
 
     ranked.sort(key=lambda x: x[0], reverse=True)
-    kept = [r[-1] for r in ranked[:keep_top] if r[0] >= min_score]
+    # Diversity-aware greedy selection: subtract orthogonality penalty vs selected
+    enable_div = True
+    try:
+        from lab.config import get as _get
+        enable_div = bool(_get("pipeline.novelty.scoring.diversity", True))
+        weight = float(_get("pipeline.novelty.scoring.diversity_weight", 0.2) or 0.2)
+        sim_thresh = float(_get("pipeline.novelty.scoring.similarity_threshold", 0.65) or 0.65)
+    except Exception:
+        weight = 0.2
+        sim_thresh = 0.65
+    kept: List[Dict[str, Any]] = []
+    def _sim(a: str, b: str) -> float:
+        try:
+            return difflib.SequenceMatcher(None, a.lower(), b.lower()).ratio()
+        except Exception:
+            return 0.0
+    for base_total, spec, grnd, pen, t1, it in ranked:
+        if not enable_div:
+            if base_total >= min_score and len(kept) < keep_top:
+                kept.append(it)
+            if len(kept) >= keep_top:
+                break
+            continue
+        txt = " ".join([
+            str(it.get("title", "")), str(it.get("spec_hint", "")), str(it.get("method", "")), str(it.get("delta_vs_prior", "")),
+        ])
+        max_sim = 0.0
+        for chosen in kept:
+            c_txt = " ".join([
+                str(chosen.get("title", "")), str(chosen.get("spec_hint", "")), str(chosen.get("method", "")), str(chosen.get("delta_vs_prior", "")),
+            ])
+            max_sim = max(max_sim, _sim(txt, c_txt))
+        eff = float(base_total) - (weight * max_sim)
+        if eff >= min_score and (max_sim <= sim_thresh or not kept):
+            kept.append(it)
+        if len(kept) >= keep_top:
+            break
     panel["new_ideas_detailed"] = kept
     panel["new_ideas"] = [it.get("title", "") for it in kept]
     return panel
-

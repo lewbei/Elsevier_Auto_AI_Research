@@ -5,7 +5,7 @@ from typing import Dict, Any, List, Tuple
 from dotenv import load_dotenv
 
 from utils.llm_utils import chat_json, LLMError, LLM_PROVIDER, LLM_MODEL
-from lab.config import get, get as get_cfg, get as _get
+from lab.config import get
 from lab.logging_utils import is_verbose, vprint, append_jsonl
 from lab.novelty_facets import extract_facets
 from lab.novelty_scoring import score_and_filter_ideas
@@ -164,11 +164,25 @@ def group_novelty_and_ideas_v2(
     # Build compact input from summaries
     items: List[Dict[str, Any]] = []
     for s in summaries:
+        rel = []
+        try:
+            for rw in (s.get("related_work") or []):
+                if isinstance(rw, dict):
+                    rel.append({
+                        "citation": str(rw.get("citation") or ""),
+                        "method_summary": str(rw.get("method_summary") or ""),
+                        "methods": [str(x) for x in (rw.get("methods") or []) if str(x)],
+                        "datasets": [str(x) for x in (rw.get("datasets") or []) if str(x)],
+                        "metrics": [str(x) for x in (rw.get("metrics") or []) if str(x)],
+                    })
+        except Exception:
+            rel = []
         items.append({
             "title": str(s.get("title") or "")[:120],
             "novelty_claims": s.get("novelty_claims") or [],
             "methods": s.get("methods") or [],
             "limitations": s.get("limitations") or [],
+            "related_methods": rel,
         })
 
     goal = str(get("project.goal", "your goal") or "your goal")
@@ -176,7 +190,7 @@ def group_novelty_and_ideas_v2(
     system = (
         "You are a meticulous panel moderator coordinating multiple expert personas to synthesize novelty across papers.\n"
         "STRICT GROUNDING:\n"
-        "- Use ONLY backbones/operators/datasets that appear in facets.backbones/ops/datasets. Do not invent generic backbones.\n"
+        "- Use ONLY backbones/operators/datasets that appear in facets.backbones/ops/datasets OR that appear in related_methods from summaries. Do not invent generic backbones.\n"
         "- Every idea MUST include: derived_from_titles (>=2), delta_vs_prior (<=240 chars citing those titles), AND >=3 numeric spec tokens (e.g., img_size=640, lr=3e-4, iou_thresh=0.6).\n"
         "- Avoid generic augmentation-only or hparam-only tweaks unless justified as non-trivial.\n"
         "- If detection/YOLO, include yolo_version, backbone, img_size, anchors, conf_thresh, iou_thresh, nms, task_adapt in method/spec_hint.\n"
@@ -390,7 +404,7 @@ def derive_research_outline(themes_and_ideas: Dict[str, Any], citations: List[Di
     }
 
 
-def _persona_discussion(summaries: List[Dict[str, Any]]) -> List[str]:
+def _persona_discussion(summaries: List[Dict[str, Any]], facets: Dict[str, List[str]] | None = None) -> List[str]:
     """Run an optional multi‑persona discussion across paper summaries.
 
     Returns list of short notes while logging full transcript to JSONL/Markdown.
@@ -416,15 +430,23 @@ def _persona_discussion(summaries: List[Dict[str, Any]]) -> List[str]:
                 "methods": (s.get("methods") or [])[:5],
                 "limitations": (s.get("limitations") or [])[:5],
             })
+        # Facets summary passed to personas to avoid "missing inputs" loops
+        fsum = {
+            "backbones": (facets or {}).get("backbones", [])[:10],
+            "ops": (facets or {}).get("ops", [])[:10],
+            "datasets": (facets or {}).get("datasets", [])[:10],
+        }
         dm = DialogueManager()
         dm.post(
             "User",
             (
-                "We will discuss novelty themes across papers and propose novel, actionable ideas under tight compute.\n"
-                "Provide role-aware, concrete observations: what clusters emerge, what is missing, risks, and specific crossovers to try."
+                "We will discuss novelty themes across the provided papers and propose novel, actionable ideas under tight compute.\n"
+                "You have everything you need: use ONLY the provided facets (backbones/ops/datasets) and the listed paper titles/context.\n"
+                "Do NOT ask for additional inputs or options; proceed using the provided facets and context; state assumptions explicitly when needed.\n"
+                "Provide role-aware, concrete observations: clusters, gaps, risks, and specific crossovers to try."
             ),
         )
-        dm.post("User", json.dumps({"papers": ctx_items}, ensure_ascii=False))
+        dm.post("User", json.dumps({"papers": ctx_items, "facets": fsum}, ensure_ascii=False))
 
         steps = 3
         # Prefer YAML, but allow env override via NOVELTY_STEPS
@@ -539,10 +561,11 @@ def _persona_discussion(summaries: List[Dict[str, Any]]) -> List[str]:
             # Proposals from proposers (force citations + deltas)
             for p_idx, role in enumerate(proposers):
                 prompt = (
-                    f"From the perspective of {_alias_at(p_idx)}, propose 2 concrete NOVELTY directions grounded in the provided papers.\n"
+                    f"From the perspective of {_alias_at(p_idx)}, propose 2 concrete NOVELTY directions grounded in the provided papers and facets.\n"
                     "Each must include:\n"
                     "TITLES:[t1,t2], DELTA_VS_PRIOR:<one sentence referencing t1/t2>, SPEC_HINT:<numbers>, RISK:<one line>.\n"
                     "Use ONLY backbones from facets.backbones. If detection, include yolo_version, iou_thresh, nms.\n"
+                    "Do NOT ask for inputs; proceed using provided facets and context.\n"
                     "Prefix each with 'PROPOSAL_NOVELTY:'."
                 )
                 r = dm.step_role(role, prompt=prompt)
@@ -708,7 +731,19 @@ def _persona_discussion(summaries: List[Dict[str, Any]]) -> List[str]:
                 print("[NOVELTY CHAT END]")
             except Exception:
                 pass
-        return notes
+        # Deduplicate near-identical lines to reduce repetition in logs
+        try:
+            import difflib as _difflib
+            uniq: List[str] = []
+            for n in notes:
+                if not uniq:
+                    uniq.append(n)
+                    continue
+                if max((_difflib.SequenceMatcher(None, n.lower(), u.lower()).ratio() for u in uniq), default=0.0) < 0.9:
+                    uniq.append(n)
+            return uniq
+        except Exception:
+            return notes
     except Exception:
         return []
 
@@ -830,15 +865,7 @@ def main() -> None:
         except Exception:
             pass
 
-    # Optional persona discussion to inform clustering
-    persona_notes: List[str] = _persona_discussion([s["summary"] for s in summaries])
-    if _progress:
-        try:
-            print(f"[NOVELTY] Persona notes recorded: {len(persona_notes)}")
-        except Exception:
-            pass
-
-    # Build facets from your summaries and persist for audit
+    # Build facets from your summaries and persist for audit (used by personas too)
     facets = extract_facets([s["summary"] for s in summaries], persist=True)
     if _progress:
         try:
@@ -850,6 +877,14 @@ def main() -> None:
                     len(facets.get("ops", [])),
                 )
             )
+        except Exception:
+            pass
+
+    # Optional persona discussion to inform clustering (with facets context)
+    persona_notes: List[str] = _persona_discussion([s["summary"] for s in summaries], facets=facets)
+    if _progress:
+        try:
+            print(f"[NOVELTY] Persona notes recorded: {len(persona_notes)}")
         except Exception:
             pass
 

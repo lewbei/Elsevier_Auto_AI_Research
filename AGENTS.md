@@ -1,172 +1,75 @@
-End‑to‑End LLM Research: Init Plan (Windows + Git‑Bash)
+Agents Overview (Programmatic, No CLI)
 
-Checklist (what I will do)
-- GPT-5 family do not use temperature parameter
-- Verify Windows Python and env (.env) are set.
-- Install requirements with pip (Windows Python).
-- Compile all Python sources to catch syntax issues.
-- Run pytest to confirm repo health.
-- Provide step‑by‑step run commands for the pipeline.
-- Note risks and rollback switches.
+Principles
+- No CLI, no argparse, no offline fallback. Use Python entrypoints directly.
+- Config via .env and optional YAML (config.yaml). YAML takes precedence; env vars override as needed.
+- Windows + Git‑Bash friendly; paths use pathlib; no shell dependencies required.
 
-Reasoning Protocol
+Environment
+- Keys: ELSEVIER_KEY (paper_finder), DEEPSEEK_API_KEY (LLM), optional X_ELS_INSTTOKEN.
+- Common toggles (YAML preferred, env optional):
+  - pipeline.skip.{find_papers|summaries|novelty|planner|iterate}
+  - pipeline.always_fresh, pipeline.max_iters
+  - pipeline.codegen.enable, pipeline.codegen.editor.enable
+  - dataset.{name|path|kind|splits|allow_fallback|allow_download}
+  - llm.{provider|model|default|custom|use}
 
-- Plan: Configure env + dependencies, validate via compile/tests, then run the LLM pipeline end‑to‑end with clear toggles and budgets.
-- Steps: Env • Deps • Compile • Tests • Run pipeline (find → novelty → planner → iterate → paper).
-- Risks: Missing API keys; rate limits; dataset not present; Windows PyTorch not installed; network variability.
-- Rollback: Use offline fallbacks, disable expensive steps, enable FakeData, or run only subsets; clear caches if needed.
+Config File
+- Place config.yaml at repo root (or set CONFIG_FILE). Example:
 
-Environment Setup (Windows + Git‑Bash)
-
-- Windows Python: use cmd to run Python (no python3).
-  - Quick check: cmd.exe /C python -V
-  - If you must reference the absolute path, the Windows path is typically C:\Users\lewka\miniconda3\envs\deep_learning\python.exe
-    and the Git‑Bash style is /c/Users/lewka/miniconda3/envs/deep_learning/python.exe, but using cmd.exe /C python is preferred.
-- Required environment variables (in .env, loaded automatically):
-  - ELSEVIER_KEY: your Elsevier API key (required for paper_finder)
-  - X_ELS_INSTTOKEN: optional institutional token
-  - DEEPSEEK_API_KEY: DeepSeek API key (required for LLM calls)
-- Optional knobs:
-  - WRITE_PAPER=1 to enable paper drafting step
-  - HITL_CONFIRM=0/HITL_AUTO_APPROVE=1 to auto‑continue gates
-  - DATASET=isic|cifar10 (default is isic)
-  - ALLOW_FALLBACK_DATASET=true to use torchvision FakeData if real dataset missing (requires torchvision)
-  - ALLOW_DATASET_DOWNLOAD=true to allow CIFAR10 download (requires torchvision)
-  - MAX_ITERS=2 to control number of iterate cycles (default 2)
-  - TIME_BUDGET_SEC=0 (0 disables budgeting) • PARALLEL_RUNS=false • MUTATE_K=0 • REPEAT_N=1
-  - LLM cache: LLM_CACHE=true • LLM_CACHE_DIR=.cache/llm
-  - Codegen: CODEGEN_ENABLE=1 to enable LLM-driven augmentation code generation during iterate (see pipeline.codegen.enable)
-  - Code editor: CODEGEN_EDITOR=1 to enable LLM REPLACE/EDIT loop that writes lab/generated_train.py (see pipeline.codegen.editor.enable)
-  - SKIP_FIND_PAPERS=1 to skip Step 1 (paper_finder)
-  - SKIP_NOVELTY=1 to skip Step 2 (novelty)
-  - SKIP_PLANNER=1 to skip Step 2.5 (planner)
-  - SKIP_ITERATE=1 to skip Step 3 (iterate)
-  - ALWAYS_FRESH=1 to re-run steps even if prior artifacts exist (plan.json, novelty_report.json, 40+ PDFs)
-  - Verbose + LLM tracing:
-    - LOG_LEVEL=debug to print detailed progress to console
-    - VERBOSE=1 alias for debug mode
-    - LLM_LOG=1 to write LLM payloads/responses under logs/llm/
-    - LLM_COST_INPUT_PER_1K / LLM_COST_OUTPUT_PER_1K to compute per-call costs and aggregate totals
-
-YAML Config Override (project‑level)
-
-- Place a `config.yaml` (or `.yml` / `.json`) at repo root to override settings globally. YAML takes precedence where supported.
-- Example:
-  
   dataset:
-    name: cifar10
-    path: data/cifar10
-    allow_fallback: true     # allow torchvision FakeData when real data missing
-    allow_download: true     # allow CIFAR10 download
-  
+    name: isic
+    path: data/isic
+    kind: imagefolder
   pipeline:
     skip:
-      find_papers: true      # skip Step 1
-      novelty: true          # skip Step 2 (requires data/novelty_report.json)
-      planner: false         # run planner (writes data/plan.json)
-      iterate: false         # run iterate
-    always_fresh: true       # do not auto-skip when artifacts already exist
-    max_iters: 5             # number of iteration cycles
-    write_paper: true        # write paper at the end
-    hitl:
-      confirm: false         # disable confirmation prompts
-      auto_approve: true     # auto-approve if confirm is enabled
+      find_papers: true
+      novelty: false
+      planner: false
+      iterate: false
+    max_iters: 2
     codegen:
-      enable: true           # enable LLM-driven augmentation module generation (writes lab/generated_aug.py)
+      enable: true
       editor:
-        enable: true         # enable REPLACE/EDIT training hooks generation (writes lab/generated_train.py)
-  
-- You can also point to a custom file with `CONFIG_FILE=path/to/config.yaml`.
+        enable: false
 
-Dependency Install (pip)
+Stage Contracts (Python Usage)
+- Summaries (agents/summarize.py)
+  - Function: process_pdfs(pdf_dir, out_dir, max_pages=0, max_chars=0, chunk_size=20000, timeout=60, max_tries=4, model=None, profile=None, verbose=True, skip_existing=True) -> int
+  - Input: PDFs under pdf_dir
+  - Output: JSON files under data/summaries/
 
-- Install core dependencies:
-  - cmd.exe /C "python -m pip install -r requirements.txt --disable-pip-version-check"
-  - Note: torch/torchvision are skipped by design on Windows in requirements.txt; experiments will gracefully run in stub mode without them.
+- Novelty (agents/novelty.py)
+  - Function: main() reads data/summaries/*.json, writes data/novelty_report.json
+  - Optional: persona discussion and facets mining (guarded by config)
 
-Compile Sources (sanity)
+- Planner (agents/planner.py)
+  - Function: main() reads data/novelty_report.json, writes data/plan.json
+  - Strict JSON normalization and validation; logs a transcript under data/plan_session.jsonl
 
-- Compile entire repo to bytecode to catch syntax errors:
-  - cmd.exe /C "python -c ""import sys,compileall; sys.exit(0 if compileall.compile_dir('.', force=True, quiet=1) else 1)"""
-  - If quoting is finicky in your shell, you can instead run: cmd.exe /C "python dev\compile_all.py" after creating a small helper.
+- Iterate (agents/iterate.py)
+  - Function: iterate(novelty_dict, max_iters=2) performs baseline/novelty/ablation + variants
+  - Outputs: runs/summary.json, runs/best.json, runs/dashboard.html, accuracy.png
 
-Run Tests (pytest)
+- Interactive (agents/interactive.py) [optional]
+  - Function: main() uses personas + editor to synthesize training hooks and run small tests
 
-- Execute unit tests:
-  - cmd.exe /C "python -m pytest -q"
-  - Tests do not hit external services and should pass locally.
+- Write Paper (agents/write_paper.py) [optional]
+  - Function: main() composes paper/paper.md and paper/main.tex from artifacts (LLM drafting optional)
 
-Pipeline Runbook (step‑by‑step)
+Programmatic Orchestration
+- Preferred: import agents.orchestrator and call main() to run staged pipeline with programmatic internals (no CLI behavior required).
+- Alternatively, call stages individually in your own script to customize control flow.
 
-1) Find and download papers (Elsevier + DeepSeek relevance)
-   - Pre‑req: set ELSEVIER_KEY and DEEPSEEK_API_KEY in .env
-   - cmd.exe /C "python -m agents.paper_finder"
-   - Auto-skip when running run_pipeline: if `pdfs/` already contains 40+ PDFs, Step 1 is skipped automatically.
-   - Optional manual skip: cmd.exe /C "set SKIP_FIND_PAPERS=1&& python run_pipeline.py"
-   - Outputs: abstract_screen_deepseek.csv and pdfs/*.pdf
-   - If you prefer to skip this and use your own PDFs, just place them under pdfs/ and move on.
-
-2) Summarize, critique, and synthesize novelty
-   - cmd.exe /C "python -m agents.novelty"
-   - Output: data/novelty_report.json
-   - Auto-skip when running run_pipeline if `data/novelty_report.json` already exists.
-
-3) Derive a compact research plan (multi‑agent with offline fallback)
-   - cmd.exe /C "python -m agents.planner"
-   - Output: data/plan.json (plus data/plan_session.jsonl logs)
-   - Auto-skip when running run_pipeline if `data/plan.json` already exists.
-
-4) Iterative experiments (baseline/novelty/ablation + variants)
-   - Defaults run safely even without torch/torchvision (stub mode). To run minimally with synthetic data, set ALLOW_FALLBACK_DATASET=true and install torchvision.
-   - cmd.exe /C "python -m agents.iterate"
-   - Outputs: runs/, experiments/, runs/summary.json, runs/best.json, runs/dashboard.html, runs/accuracy.png
-
-5) Write paper draft (optional)
-   - Enable with WRITE_PAPER=1 (or set env for the command):
-   - cmd.exe /C "set WRITE_PAPER=1&& python -m agents.write_paper"
-   - Outputs: paper/paper.md and paper/main.tex (+ refs.bib built from CSV if present). Attempts pdflatex if available.
-
- One‑shot pipeline
-
-- Run everything (4 steps; paper drafting only if WRITE_PAPER=1):
-  - cmd.exe /C "python run_pipeline.py"  (auto-skips Step 1 if 40+ PDFs present)
-  - With YAML-only control (no env flags): run the same command; pipeline will auto-skip steps per config.yaml and existing artifacts.
-
-- Skip early stages when artifacts already exist (examples):
-  - Skip finder and novelty, then run planner+iterate:  
-    cmd.exe /C "set SKIP_FIND_PAPERS=1&& set SKIP_NOVELTY=1&& python run_pipeline.py"
-  - Run only iterate (assumes data/novelty_report.json exists):  
-    cmd.exe /C "set SKIP_FIND_PAPERS=1&& set SKIP_NOVELTY=1&& set SKIP_PLANNER=1&& python -m agents.iterate"
-
-Validation and Artifacts
-
-- Key outputs:
-  - PDFs: pdfs/
-  - Summaries: data/summaries/
-  - Novelty report: data/novelty_report.json
-  - Plan: data/plan.json
-  - Runs + reports: runs/ (report.md, dashboard.html, best.json)
-  - Paper draft: paper/ (if WRITE_PAPER=1)
-
-Risks and Mitigations
-
-- Keys missing: LLM calls or Elsevier queries will fail; set .env. LLM utilities warn on missing vars.
-- Rate limits (Elsevier/DeepSeek): built‑in backoff; re‑run later; keep MAX_KEPT modest in paper_finder.
-- No dataset / no torchvision: agents_iterate falls back to stub mode; set ALLOW_FALLBACK_DATASET=true + install torchvision for FakeData.
-- Windows path issues: prefer cmd.exe /C python … to avoid path translation; keep working directory at repo root.
-
-Rollback / Safe switches
-
-- Offline planning: agents_planner.make_plan_offline() auto‑engages on LLM error.
-- Skip paper writing: omit WRITE_PAPER.
-- Compute budget: set TIME_BUDGET_SEC to halt long iterations. Use REPEAT_N=1 and MUTATE_K=0 for minimal runs.
-- Clear caches: remove .cache/llm if needed to re‑query LLM.
+Artifacts
+- PDFs: pdfs/
+- Summaries: data/summaries/
+- Novelty report: data/novelty_report.json
+- Plan: data/plan.json (+ data/plan_session.jsonl)
+- Runs + reports: runs/ (report.md, dashboard.html, best.json, summary.json)
+- Paper: paper/ (paper.md, main.tex)
 
 Notes
+- GPT‑5 family omits temperature by design (handled in utils/llm_utils).
+- No offline fallbacks are performed by default. If you need deterministic placeholders, add them explicitly behind opt-in flags.
 
-- Domain‑agnostic: Set your project `goal` in `config.yaml`; prompts adapt to it. No hard‑coded domain defaults.
-- Dataset via YAML: `dataset.kind` imagefolder|cifar10|custom, `dataset.path`, and `dataset.splits` control train/val/test. CIFAR10 uses a train/val split (val_fraction) and official test for evaluation.
-- Evaluation: selection uses validation; reports highlight test metrics by default.
-- .env is loaded by python‑dotenv; do not commit secrets.
-- LLM caching is enabled by default (LLM_CACHE=true); cached JSON lives under .cache/llm/.
-- MLflow is optional and disabled by default. Enable with MLFLOW_ENABLED=true and set MLFLOW_TRACKING_URI if desired.

@@ -49,18 +49,27 @@ def _persona_phase_notes(phase: str, context: Dict[str, Any], steps: int = 2) ->
         dm.post("User", f"Context: {json.dumps(context, ensure_ascii=False)}")
         notes: List[str] = []
         for i in range(max(1, steps)):
-            # Auto step cycles personas in DialogueManager
+            # Auto step cycles personas in DialogueManager (JSON-aware)
             r = dm.step_auto()
-            notes.append(f"[{r.get('role','')}] {r.get('text','')}")
+            txt = r.get('text','')
+            if not txt and r.get('json') is not None:
+                try:
+                    txt = json.dumps(r.get('json'), ensure_ascii=False)
+                except Exception:
+                    txt = str(r.get('json'))
+            notes.append(f"[{r.get('role','')}] {txt}")
         return notes
     except Exception:
         return []
 
 
-def _run_mod(mod: str) -> None:
+def _run_mod(mod: str, env_overrides: Dict[str, str] | None = None) -> None:
     cmd = [sys.executable, "-m", mod]
     print(f"[ORCH] RUN {' '.join(cmd)}")
-    subprocess.run(cmd, cwd=str(HERE), check=True)
+    env = os.environ.copy()
+    if env_overrides:
+        env.update(env_overrides)
+    subprocess.run(cmd, cwd=str(HERE), check=True, env=env)
 
 
 def main() -> None:
@@ -86,7 +95,7 @@ def main() -> None:
         print("[ORCH] Skipping paper_finder per config/env")
 
     # Phase: summaries (per-paper)
-    if not (get_bool("pipeline.skip.summaries", False) or (str(os.getenv("SKIP_SUMMARIES", "").lower() in {"1", "true", "yes"}))):
+    if not (get_bool("pipeline.skip.summaries", False) or ((str(os.getenv("SKIP_SUMMARIES", "")).strip().lower()) in {"1", "true", "yes"})):
         notes = _persona_phase_notes("summaries", {}, steps)
         if notes:
             log("summaries_notes", notes)
@@ -96,6 +105,19 @@ def main() -> None:
             from agents.summarize import process_pdfs
             pdf_dir = HERE / "pdfs"
             sum_dir = HERE / "data" / "summaries"
+            # Count PDFs and detect missing summaries by filename
+            try:
+                pdfs = sorted([p for p in pdf_dir.glob("*.pdf") if p.is_file()]) if pdf_dir.exists() else []
+                pdf_count = len(pdfs)
+                missing = []
+                for p in pdfs:
+                    out_path = (sum_dir / f"{p.stem}.json")
+                    if not out_path.exists():
+                        missing.append(p)
+                print(f"[ORCH] Summaries: found {pdf_count} PDFs; missing={len(missing)}")
+                summaries_up_to_date = (pdf_count > 0 and len(missing) == 0)
+            except Exception:
+                summaries_up_to_date = False
             # Prefer full-text mode for GPT-5 mini
             profile = (get("pipeline.summarize.llm", None) or None)
             model = (get("pipeline.summarize.model", None) or None)
@@ -109,7 +131,20 @@ def main() -> None:
 
             skip_existing_cfg = get("pipeline.summarize.skip_existing", None)
             skip_existing = True if skip_existing_cfg is None else bool(skip_existing_cfg)
-            process_pdfs(
+            # Per-stage streaming toggle
+            try:
+                from lab.config import get_bool as _get_bool
+                summ_stream = bool(_get_bool("pipeline.summarize.stream", get_bool("llm.stream", False)))
+            except Exception:
+                summ_stream = False
+            prev_stream = os.getenv("LLM_STREAM")
+            if summ_stream:
+                os.environ["LLM_STREAM"] = "1"
+            else:
+                os.environ.pop("LLM_STREAM", None)
+            try:
+                if not locals().get("summaries_up_to_date", False):
+                    process_pdfs(
                 pdf_dir=str(pdf_dir),
                 out_dir=str(sum_dir),
                 max_pages=int(get("pipeline.summarize.max_pages", 0) or 0),
@@ -121,7 +156,15 @@ def main() -> None:
                 profile=profile,
                 verbose=bool(get("pipeline.summarize.progress", True) or get("pipeline.summarize.detail", False)),
                 skip_existing=skip_existing,
-            )
+                    )
+                else:
+                    print("[ORCH] Summaries step skipped: all PDFs already summarized.")
+            finally:
+                # restore env
+                if prev_stream is None:
+                    os.environ.pop("LLM_STREAM", None)
+                else:
+                    os.environ["LLM_STREAM"] = prev_stream
         except Exception as exc:
             print(f"[ORCH] Summaries failed: {exc}")
     else:
@@ -133,7 +176,13 @@ def main() -> None:
         if notes:
             log("novelty_notes", notes)
             _write_text(notes_dir / "novelty.txt", "\n\n".join(notes))
-        _run_mod("agents.novelty")
+        # Per-stage streaming for novelty
+        try:
+            nov_stream = bool(get_bool("pipeline.novelty.stream", get_bool("llm.stream", False)))
+        except Exception:
+            nov_stream = False
+        env = {"LLM_STREAM": "1"} if nov_stream else {}
+        _run_mod("agents.novelty", env_overrides=env)
     else:
         print("[ORCH] Skipping novelty per config/env")
 

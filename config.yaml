@@ -44,15 +44,15 @@ llm:
   default: gpt-5-mini   # OpenAI GPT‑5 mini
   custom: deepseek      # DeepSeek chat
   use: default          # fallback profile when per-agent is omitted
-  # Optional streaming toggle for chat_text (unsupported for JSON outputs)
-  stream: false
+  # Streaming toggle for LLM calls (chat_text and chat_json)
+  stream: true
 
 # Pipeline controls (YAML-first). All are optional.
 pipeline:
   # Skip stages automatically without CLI or env flags
   skip:
     find_papers: true
-    summaries: false
+    summaries: true
     novelty: false
     idea_blueprints: false
     planner: false
@@ -84,10 +84,16 @@ pipeline:
     max_tries: 4          # retry attempts on 429/5xx/transient errors
     # Enforce required presence of training knobs/metrics/dataset_details
     enforce_required: true
+    # Fill missing fields with a clear note instead of blanks
+    fill_not_mentioned: true
+    # Per-stage streaming toggle
+    stream: true
 
   # Novelty agent configuration
   novelty:
     llm: default
+    # Per-stage streaming toggle
+    stream: true
     personas:
       enable: true
       steps: 4
