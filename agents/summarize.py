@@ -6,7 +6,7 @@ from typing import Dict, Any, List
 from dotenv import load_dotenv
 
 from utils.pdf_utils import extract_text_from_pdf
-from utils.llm_utils import chat_json, LLMError
+from utils.llm_utils import chat_json, LLMError, LLM_PROVIDER, LLM_MODEL, LLM_CHAT_URL
 from lab.config import get
 
 
@@ -44,7 +44,7 @@ def _as_dict(x: Any) -> Dict[str, Any]:
 
 # ---- All‑LLM 3‑pass extraction helpers ----
 
-def _llm_pass1_extraction(text: str) -> Dict[str, Any]:
+def _llm_pass1_extraction(text: str, *, timeout: int | None = None, max_tries: int | None = None) -> Dict[str, Any]:
     system = (
         "You are an expert scientific information extractor. From the provided paper text only, produce a broad extraction pack JSON for downstream summarization. "
         "No outside knowledge. If something isn’t in the text, leave it blank. Keep each string under ~240 chars. Use normalized short names for models/metrics/datasets. JSON only."
@@ -73,20 +73,30 @@ def _llm_pass1_extraction(text: str) -> Dict[str, Any]:
             "reproducibility": {"code_available": "string", "data_available": "string", "artifacts": ["string"]},
             "captions": {"tables": ["string"], "figures": ["string"]},
             "coverage_report": {"missing": ["string"], "notes": ["string"]},
+            "related_work": [
+                {"title": "string", "citation": "string", "venue": "string", "year": "string", "doi": "string", "url": "string", "relation": "string"}
+            ],
         },
         "rules": [
             "Facts only from text; if absent -> empty string/list.",
             "Normalize names: e.g., resnet18, cifar10, accuracy, auc, f1.",
             "Numbers → put in results_numbers; include split/dataset if stated.",
             "Short bullet phrases; dedupe; no speculation; JSON only.",
+            "For related_work, extract at most 12 entries grounded in the paper text (e.g., References and in-text comparisons). Use concise citation strings like 'Author et al., YEAR — note'.",
         ],
     }
     model = os.getenv("SUM_MODEL") or (get("pipeline.summarize.model", None) if isinstance(get("pipeline.summarize.model", None), str) else None)
     profile = get("pipeline.summarize.llm", None)
-    return chat_json(system, json.dumps(user, ensure_ascii=False), temperature=0.0, model=model, profile=profile)
+    # Timeouts/retries are configurable; fall back to chat_json defaults when None
+    kwargs: Dict[str, Any] = {}
+    if timeout is not None:
+        kwargs["timeout"] = int(timeout)
+    if max_tries is not None:
+        kwargs["max_tries"] = int(max_tries)
+    return chat_json(system, json.dumps(user, ensure_ascii=False), temperature=0.0, model=model, profile=profile, **kwargs)
 
 
-def _llm_pass2_gap_fill(text: str, pack: Dict[str, Any]) -> Dict[str, Any]:
+def _llm_pass2_gap_fill(text: str, pack: Dict[str, Any], *, timeout: int | None = None, max_tries: int | None = None) -> Dict[str, Any]:
     system = (
         "You are a meticulous auditor. Given an extraction pack and the same paper text, fill only missing/uncertain fields. Do not change already-filled correct fields. "
         "If still not present in the text, keep blank and record in coverage_report.missing_after_second_pass. JSON only."
@@ -94,10 +104,15 @@ def _llm_pass2_gap_fill(text: str, pack: Dict[str, Any]) -> Dict[str, Any]:
     user = {"paper_text": text, "extraction_pack": pack}
     model = os.getenv("SUM_MODEL") or (get("pipeline.summarize.model", None) if isinstance(get("pipeline.summarize.model", None), str) else None)
     profile = get("pipeline.summarize.llm", None)
-    return chat_json(system, json.dumps(user, ensure_ascii=False), temperature=0.0, model=model, profile=profile)
+    kwargs: Dict[str, Any] = {}
+    if timeout is not None:
+        kwargs["timeout"] = int(timeout)
+    if max_tries is not None:
+        kwargs["max_tries"] = int(max_tries)
+    return chat_json(system, json.dumps(user, ensure_ascii=False), temperature=0.0, model=model, profile=profile, **kwargs)
 
 
-def _llm_merge_packs(packs: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _llm_merge_packs(packs: List[Dict[str, Any]], *, timeout: int | None = None, max_tries: int | None = None) -> Dict[str, Any]:
     if len(packs) == 1:
         return packs[0]
     system = (
@@ -107,7 +122,12 @@ def _llm_merge_packs(packs: List[Dict[str, Any]]) -> Dict[str, Any]:
     user = {"packs": packs}
     model = os.getenv("SUM_MODEL") or (get("pipeline.summarize.model", None) if isinstance(get("pipeline.summarize.model", None), str) else None)
     profile = get("pipeline.summarize.llm", None)
-    return chat_json(system, json.dumps(user, ensure_ascii=False), temperature=0.0, model=model, profile=profile)
+    kwargs: Dict[str, Any] = {}
+    if timeout is not None:
+        kwargs["timeout"] = int(timeout)
+    if max_tries is not None:
+        kwargs["max_tries"] = int(max_tries)
+    return chat_json(system, json.dumps(user, ensure_ascii=False), temperature=0.0, model=model, profile=profile, **kwargs)
 
 
 def _llm_pass3_finalize_schema(merged_pack: Dict[str, Any]) -> Dict[str, Any]:
@@ -151,6 +171,9 @@ def _llm_pass3_finalize_schema(merged_pack: Dict[str, Any]) -> Dict[str, Any]:
         "future_work": ["string"],
         "keywords": ["string"],
         "confidence": "0.0-1.0 float as string",
+        "related_work": [
+            {"title": "string", "citation": "string", "venue": "string", "year": "string", "doi": "string", "url": "string", "relation": "string"}
+        ],
     }
     user = {
         "extraction_pack": merged_pack,
@@ -168,7 +191,8 @@ def _llm_pass3_finalize_schema(merged_pack: Dict[str, Any]) -> Dict[str, Any]:
             "Metrics MUST include 'accuracy' and an AUC entry with explicit mode: 'auc (macro|micro|ovr|unspecified)'; include precision/recall/f1 with averaging tags when stated or '(unspecified)' otherwise; include 'confusion_matrix'.",
             "results_numbers rows should use normalized fields: metric, value, dataset, split (train|val|test), baseline, improvement; prefer per-model rows when present.",
             "If dataset_details[] exists, ensure each object has keys name, size, splits, preprocessing, notes (empty string when unknown). If none exist but datasets[] is present, add one combined entry with empty keys except name.",
-            "If the paper uses YOLO/detection, include YOLO-specific strings within architecture[]/training_procedure[] when present: yolo_version:, backbone:, img_size:, anchors:, conf_thresh:, iou_thresh:, nms:, task_adapt:."
+            "If the paper uses YOLO/detection, include YOLO-specific strings within architecture[]/training_procedure[] when present: yolo_version:, backbone:, img_size:, anchors:, conf_thresh:, iou_thresh:, nms:, task_adapt.",
+            "For related_work[], keep ≤12 entries; dedupe by DOI/title; include a short 'citation' string and optional DOI/URL when explicitly present; 'relation' should briefly explain the connection (baseline, similar method, prior SOTA)."
         ],
     }
     model = os.getenv("SUM_MODEL") or (get("pipeline.summarize.model", None) if isinstance(get("pipeline.summarize.model", None), str) else None)
@@ -219,7 +243,7 @@ def summarize_paper(text: str, title_hint: str = "", file_stem: str | None = Non
     )
     user_payload = {
         "title_hint": title_hint,
-        "paper_text": _truncate(text, 40000),
+        "paper_text": _truncate(text, 120000),
         "output_schema": {
             # Core metadata
             "title": "string",
@@ -274,7 +298,10 @@ def summarize_paper(text: str, title_hint: str = "", file_stem: str | None = Non
             "conclusions": ["string"],
             "future_work": ["string"],
             "keywords": ["string"],
-            "confidence": "0.0-1.0 float as string"
+            "confidence": "0.0-1.0 float as string",
+            "related_work": [
+                {"title": "string", "citation": "string", "venue": "string", "year": "string", "doi": "string", "url": "string", "relation": "string"}
+            ]
         },
         "instructions": (
             "Extract exact facts from the text. Use short phrases, not paragraphs. Where numeric comparisons are given, include them in results_numbers. "
@@ -283,12 +310,34 @@ def summarize_paper(text: str, title_hint: str = "", file_stem: str | None = Non
             "Include augmentation lines as 'aug: ...' with magnitudes when present. "
             "Metrics MUST include 'accuracy' and 'auc (macro|micro|ovr|unspecified)' plus precision/recall/f1 with averaging tags (or '(unspecified)' if not stated), and 'confusion_matrix'. "
             "Ensure dataset_details[] objects include keys: name, size, splits, preprocessing, notes (use '' when unknown)."
+            " Extract up to 12 related_work items from the paper text (References and in-text comparisons). Each should include a concise 'citation' string and optional DOI/URL if explicitly present."
         ),
     }
     # All‑LLM 3‑pass flow with chunking support
     # Pass 1: extraction per chunk
     full_text = text
     packs: List[Dict[str, Any]] = []
+    # LLM timeout/retries controls (YAML first, env override)
+    try:
+        cfg_timeout = get("pipeline.summarize.timeout", None)
+        cfg_timeout_full = get("pipeline.summarize.timeout_full", None)
+        cfg_max_tries = get("pipeline.summarize.max_tries", None)
+    except Exception:
+        cfg_timeout = None
+        cfg_timeout_full = None
+        cfg_max_tries = None
+    try:
+        base_timeout = int(os.getenv("SUM_TIMEOUT", str(cfg_timeout if isinstance(cfg_timeout, int) else "60") ) or 60)
+    except Exception:
+        base_timeout = 60
+    try:
+        full_timeout = int(os.getenv("SUM_TIMEOUT_FULL", str(cfg_timeout_full if isinstance(cfg_timeout_full, int) else str(max(base_timeout, 120)))) or max(base_timeout, 120))
+    except Exception:
+        full_timeout = max(base_timeout, 120)
+    try:
+        max_tries = int(os.getenv("SUM_MAX_TRIES", str(cfg_max_tries if isinstance(cfg_max_tries, int) else "4")) or 4)
+    except Exception:
+        max_tries = 4
     # If pass1_chunk <= 0, treat as "no chunking" when chunking is used.
     try:
         cfg_chunk = get("pipeline.summarize.pass1_chunk", None)
@@ -308,6 +357,18 @@ def summarize_paper(text: str, title_hint: str = "", file_stem: str | None = Non
         show_detail = (str(os.getenv("SUM_DETAIL", "")).lower() in {"1", "true", "yes", "on"}) or bool(yaml_detail)
     except Exception:
         show_detail = False
+    # Print raw LLM JSON outputs (finalize step). Default = True. Env/YAML can disable.
+    try:
+        yaml_print_raw = get("pipeline.summarize.print_raw", True)
+    except Exception:
+        yaml_print_raw = True
+    _env_pr = str(os.getenv("SUM_PRINT_RAW", "")).lower()
+    if _env_pr in {"0", "false", "no", "off"}:
+        print_raw = False
+    elif _env_pr in {"1", "true", "yes", "on"}:
+        print_raw = True
+    else:
+        print_raw = bool(yaml_print_raw)
     # Prefer a single full-text pass first, and only fall back to chunking on LLM error
     try:
         yaml_force = get("pipeline.summarize.force_chunk", False)
@@ -319,8 +380,14 @@ def summarize_paper(text: str, title_hint: str = "", file_stem: str | None = Non
         if show_progress:
             print(f"[SUM] Pass1: full-text (size={len(full_text)}) …")
         try:
+            if show_detail:
+                try:
+                    model_used = os.getenv("SUM_MODEL") or (get("pipeline.summarize.model", None) if isinstance(get("pipeline.summarize.model", None), str) else LLM_MODEL)
+                except Exception:
+                    model_used = LLM_MODEL
+                print(f"[SUM]  â€¢ LLM ctx: provider={LLM_PROVIDER} model={model_used} timeout_full={full_timeout} max_tries={max_tries} pass1_chunk={chunk_size}")
             t0 = time.time()
-            p1 = _llm_pass1_extraction(full_text)
+            p1 = _llm_pass1_extraction(full_text, timeout=full_timeout, max_tries=max_tries)
             packs.append(p1)
             # Optional raw saving
             if str(os.getenv("SUM_SAVE_RAW", "")).lower() in {"1", "true", "yes", "on"} and file_stem:
@@ -329,9 +396,26 @@ def summarize_paper(text: str, title_hint: str = "", file_stem: str | None = Non
             if show_detail:
                 print(f"[SUM]  • full-text took {time.time()-t0:.1f}s")
         except LLMError as exc:
+            msg = str(exc)
             if show_progress:
-                msg = str(exc)
-                print(f"[SUM]  • full-text failed ({msg[:80]}…). Falling back to chunking.")
+                print(f"[SUM]  • full-text failed ({msg[:160]}). Falling back to chunking.")
+            # Extra diagnostics in detail mode
+            if show_detail:
+                try:
+                    profile_used = get("pipeline.summarize.llm", None)
+                except Exception:
+                    profile_used = None
+                try:
+                    model_used = os.getenv("SUM_MODEL") or (get("pipeline.summarize.model", None) if isinstance(get("pipeline.summarize.model", None), str) else LLM_MODEL)
+                except Exception:
+                    model_used = LLM_MODEL
+                keys_present = {
+                    "OPENAI_API_KEY": bool(os.getenv("OPENAI_API_KEY")),
+                    "DEEPSEEK_API_KEY": bool(os.getenv("DEEPSEEK_API_KEY")),
+                    "OPENROUTER_API_KEY": bool(os.getenv("OPENROUTER_API_KEY")),
+                }
+                print(f"[SUM]  • LLM error detail: {msg}")
+                print(f"[SUM]  • LLM context: profile={profile_used} provider={LLM_PROVIDER} model={model_used} url={LLM_CHAT_URL} timeout_full={full_timeout} max_tries={max_tries} keys_present={keys_present}")
             attempted_full = False
 
     if not attempted_full:
@@ -357,7 +441,7 @@ def summarize_paper(text: str, title_hint: str = "", file_stem: str | None = Non
                     end = min(i + chunk_size, len(full_text))
                     print(f"[SUM]  • chunk {idx}/{n_chunks} ({start}:{end}) …")
                 t0 = time.time()
-                ch = _llm_pass1_extraction(full_text[i : i + chunk_size])
+                ch = _llm_pass1_extraction(full_text[i : i + chunk_size], timeout=base_timeout, max_tries=max_tries)
                 packs.append(ch)
                 if str(os.getenv("SUM_SAVE_RAW", "")).lower() in {"1", "true", "yes", "on"} and file_stem:
                     (SUM_DIR / f"{file_stem}.pass1.{idx}.json").write_text(json.dumps(ch, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -367,7 +451,13 @@ def summarize_paper(text: str, title_hint: str = "", file_stem: str | None = Non
     if show_progress:
         print("[SUM] Merge extraction packs …")
     t0 = time.time()
-    merged = _llm_merge_packs(packs)
+    if show_detail:
+        try:
+            model_used = os.getenv("SUM_MODEL") or (get("pipeline.summarize.model", None) if isinstance(get("pipeline.summarize.model", None), str) else LLM_MODEL)
+        except Exception:
+            model_used = LLM_MODEL
+        print(f"[SUM]  â€¢ packs={len(packs)} provider={LLM_PROVIDER} model={model_used} timeout={base_timeout} max_tries={max_tries}")
+    merged = _llm_merge_packs(packs, timeout=base_timeout, max_tries=max_tries)
     save_raw = False
     try:
         save_raw = bool(get("pipeline.summarize.save_raw", False)) or (str(os.getenv("SUM_SAVE_RAW", "")).lower() in {"1", "true", "yes", "on"})
@@ -383,8 +473,14 @@ def summarize_paper(text: str, title_hint: str = "", file_stem: str | None = Non
     # Pass 2: gap fill
     if show_progress:
         print("[SUM] Gap‑fill missing fields …")
+    if show_detail:
+        try:
+            model_used = os.getenv("SUM_MODEL") or (get("pipeline.summarize.model", None) if isinstance(get("pipeline.summarize.model", None), str) else LLM_MODEL)
+        except Exception:
+            model_used = LLM_MODEL
+        print(f"[SUM]  â€¢ provider={LLM_PROVIDER} model={model_used} timeout={base_timeout} max_tries={max_tries}")
     t0 = time.time()
-    merged2 = _llm_pass2_gap_fill(full_text, merged)
+    merged2 = _llm_pass2_gap_fill(full_text, merged, timeout=base_timeout, max_tries=max_tries)
     if save_raw and file_stem:
         (SUM_DIR / f"{file_stem}.gapfill.json").write_text(json.dumps(merged2, ensure_ascii=False, indent=2), encoding="utf-8")
     if show_detail:
@@ -428,6 +524,12 @@ def summarize_paper(text: str, title_hint: str = "", file_stem: str | None = Non
     js = _llm_pass3_finalize_schema(merged2)
     if save_raw and file_stem:
         (SUM_DIR / f"{file_stem}.final_raw.json").write_text(json.dumps(js, ensure_ascii=False, indent=2), encoding="utf-8")
+    if print_raw:
+        try:
+            print("[SUM RAW] Final LLM JSON (pre-validate):")
+            print(json.dumps(js, ensure_ascii=False, indent=2))
+        except Exception:
+            pass
     if show_detail:
         print(f"[SUM]  • finalize took {time.time()-t0:.1f}s")
 
@@ -475,6 +577,7 @@ def summarize_paper(text: str, title_hint: str = "", file_stem: str | None = Non
                 "future_work": {"type": "array", "items": {"type": "string"}},
                 "keywords": {"type": "array", "items": {"type": "string"}},
                 "confidence": {"type": "string"},
+                "related_work": {"type": "array"},
             },
             "required": ["title", "problem", "methods", "datasets", "results", "keywords", "confidence"],
         }
@@ -630,6 +733,36 @@ def summarize_paper(text: str, title_hint: str = "", file_stem: str | None = Non
     out["results_numbers"] = rn if isinstance(rn, list) else []
     out["reproducibility"] = _as_dict(js.get("reproducibility"))
     out["resources"] = _as_dict(js.get("resources"))
+
+    # Related work normalization (list of objects with citation fields)
+    def _fix_related_work(x: Any) -> List[Dict[str, str]]:
+        items: List[Dict[str, str]] = []
+        if isinstance(x, list):
+            for it in x:
+                if isinstance(it, dict):
+                    items.append({
+                        "title": _as_str(it.get("title")),
+                        "citation": _as_str(it.get("citation")),
+                        "venue": _as_str(it.get("venue")),
+                        "year": _as_str(it.get("year")),
+                        "doi": _as_str(it.get("doi")),
+                        "url": _as_str(it.get("url")),
+                        "relation": _as_str(it.get("relation")),
+                    })
+                else:
+                    s = _as_str(it)
+                    if s:
+                        items.append({
+                            "title": "",
+                            "citation": s,
+                            "venue": "",
+                            "year": "",
+                            "doi": "",
+                            "url": "",
+                            "relation": "",
+                        })
+        return items
+    out["related_work"] = _fix_related_work(js.get("related_work"))
 
     # Completeness score (light)
     checks = [bool(out.get("title")), bool(out.get("problem")), bool(out.get("methods")), bool(out.get("datasets")), bool(out.get("results"))]
