@@ -24,6 +24,10 @@ DATA_DIR = pathlib.Path("data")
 RUBRIC_PATH = DATA_DIR / "tier1_rubric.json"
 GRADE_PATH = DATA_DIR / "tier1_grade.json"
 BLUEPRINT_PATH = DATA_DIR / "paper_blueprint_llm.md"
+GATE_PATH = DATA_DIR / "tier1_gate.json"
+UPGRADE_PLAN_PATH = DATA_DIR / "tier1_upgrade_plan.md"
+GATE_PATH = DATA_DIR / "tier1_gate.json"
+UPGRADE_PLAN_PATH = DATA_DIR / "tier1_upgrade_plan.md"
 
 
 def _ensure_dirs() -> None:
@@ -235,14 +239,127 @@ def build_blueprint_md_llm(final: Dict[str, Any], rubric: Dict[str, Any], grade:
     return md
 
 
+def _assert_tier1_ready(grade: Dict[str, Any]) -> Dict[str, Any]:
+    """Deterministic pass/fail gate using environment floors."""
+    import os as _os, json as _json
+    overall_min = float(_os.getenv("TIER1_OVERALL_MIN", "0.70"))
+    dim_floor = float(_os.getenv("TIER1_DIM_FLOOR", "0.60"))
+    dims = grade.get("dimensions") or []
+    failures: List[str] = []
+    try:
+        overall = float(grade.get("overall") or 0.0)
+    except Exception:
+        overall = 0.0
+    if overall < overall_min:
+        failures.append(f"overall<{overall_min:.2f}")
+    for d in dims:
+        nm = str(d.get("name") or "")
+        try:
+            sc = float(d.get("score") or 0.0)
+        except Exception:
+            sc = 0.0
+        if sc < dim_floor:
+            failures.append(f"{nm}<{dim_floor:.2f}")
+    gate = {"pass": not failures, "failures": failures, "overall_min": overall_min, "dim_floor": dim_floor}
+    try:
+        GATE_PATH.write_text(_json.dumps(gate, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+    return gate
+
+
+def _load_user_spec_for_plan() -> Dict[str, Any]:
+    import os as _os, json as _json, pathlib as _pl
+    p = _pl.Path(_os.getenv("USER_SPEC_PATH", "data/user_spec.json"))
+    if p.exists():
+        try:
+            return _json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+
+def build_upgrade_plan(final: Dict[str, Any], rubric: Dict[str, Any], grade: Dict[str, Any], gate: Dict[str, Any]) -> str:
+    """Deterministic Tier‑1 upgrade plan builder, writes Markdown."""
+    _ensure_dirs()
+    spec = _load_user_spec_for_plan()
+    obj = spec.get("objective", "") or (final.get("problems") or [""])[0]
+    hyps = [h.strip() for h in (spec.get("hypotheses") or []) if isinstance(h, str) and h.strip()]
+    if not hyps:
+        hyps = [h for h in (final.get("research_questions") or [])[:3] if isinstance(h, str) and h.strip()]
+
+    lines: List[str] = []
+    lines.append("# Tier-1 Journal Upgrade Plan")
+    if obj:
+        lines.append("\n> **Objective (verbatim):** " + obj)
+    if hyps:
+        lines.append("\n> **Hypotheses (verbatim):**")
+        for h in hyps:
+            lines.append(f"> - {h}")
+
+    lines.append("""
+---
+## Methodological Upgrades
+### Constrained FiLM (cFiLM)
+- Identity-anchored init (γ≈1, β≈0), residual reparam with E[Δγ]=E[Δβ]=0.
+- Sparsity on (γ−1,β) via group-Lasso by metadata factor; orthogonality gating with low-rank W to restrict modulation subspace.
+- Stability penalty on (γ,β) trajectories; per-factor masks (age, sex, site) logged and visualized.
+
+### Uncertainty-Mass Selection (UMS)
+- Score S(box)=α·CAM_conf − β·MC_var + γ·CAM_mass_in_box with per-image z-score normalization; ∥[α,β,γ]∥₁=1.
+- Select α,β,γ by small CV to maximize AP@0.5_small subject to FP/image≤κ.
+- Curriculum: strict→relaxed gating driven by detector calibration (ECE) and FP/image caps.
+
+---
+## Experimental Program
+### Stage-A (≤100 steps, sanity and pilot)
+- Keep your T1–T10 quick-smoke protocol; 2 seeds; bootstrap CIs; early-stop.
+### Stage-B (full budget for journal evidence)
+- ≥2 datasets with metadata + localization; one external/OOD. Site-stratified splits.
+- Strong baselines: image-only, concat, shuffled-metadata FiLM, attention-gated fusion, MIL-WSOD, entropy/ensemble uncertainty.
+- Metrics: AUROC/AUPRC, sensitivity@95%, ECE/Brier, decision curves; AP@0.5_small, FROC, objectness calibration; subgroup/OOD deltas.
+- Stats: DeLong, paired bootstrap, McNemar; FDR control.
+---
+## Ablations & Sensitivity (must report)
+- cFiLM removals; conv4 vs conv5; metadata shuffles; capacity-matched adapters.
+- UMS term ablations; CAM variants; MC-T sweeps; curriculum schedules.
+- Budget sensitivity: ≤100-step vs full epoch trends; seed variance.
+---
+## Acceptance Gates (hard)
+- ΔAUROC ≥ 0.02 & Δsens@95% ≥ 0.03 vs strongest baseline on 2 datasets (non-overlapping 95% CIs; FDR q≤0.05).
+- ΔAP@0.5_small ≥ 0.03 with FP/image ≤ +20%; non-overlapping 95% CIs on 2 datasets.
+- Fairness: no subgroup drop >10%; OOD retains ≥70% of in-domain gains.
+- Calibration not degraded.
+---
+## Reproducibility & Artifacts
+- Deterministic seeds, pinned env, exact param counts (FiLM ±5%).
+- Release configs, logs, pseudo-labels, threshold curves, and code.
+""")
+    lines.append("\n---\n\n## Tier-1 Gate Summary")
+    lines.append(f"- PASS: {bool(gate.get('pass'))}")
+    if gate.get("failures"):
+        lines.append("- Fail reasons:")
+        for f in gate.get("failures"):
+            lines.append(f"  - {f}")
+    lines.append(f"- Floors: overall≥{gate.get('overall_min')} and per-dimension≥{gate.get('dim_floor')}")
+    md = "\n".join(lines)
+    try:
+        UPGRADE_PLAN_PATH.write_text(md, encoding="utf-8")
+    except Exception:
+        pass
+    return md
+
+
 def run_tier1_validator(final: Dict[str, Any]) -> Dict[str, Any]:
     _ensure_dirs()
     try:
         citations = final.get("citations") or []
         rubric = generate_rubric_llm(final, citations=citations)
         grade = grade_with_rubric_llm(final, rubric)
+        gate = _assert_tier1_ready(grade)
         build_blueprint_md_llm(final, rubric, grade)
-        return {"rubric": rubric, "grade": grade}
+        build_upgrade_plan(final, rubric, grade, gate)
+        return {"rubric": rubric, "grade": grade, "gate": gate}
     except Exception as exc:
         # Write minimal artifacts on failure for auditability
         try:
@@ -255,4 +372,3 @@ def run_tier1_validator(final: Dict[str, Any]) -> Dict[str, Any]:
         except Exception:
             pass
         raise exc
-

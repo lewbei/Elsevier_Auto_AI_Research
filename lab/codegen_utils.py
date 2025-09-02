@@ -142,3 +142,78 @@ def sanity_check_generated_head() -> bool:
         return inst is not None
     except Exception:
         return False
+
+
+# ---- Optional generated model support (classification/regression) ----
+MODEL_TEMPLATE = """
+import torch
+import torch.nn as nn
+
+
+class GeneratedModel(nn.Module):
+    def __init__(self, in_ch: int = 3, num_classes: int = 2, task: str = "classification", hidden: int = 64, depth: int = 3, p: float = 0.2):
+        super().__init__()
+        layers = []
+        c = in_ch
+        for i in range(max(1, int(depth))):
+            layers += [nn.Conv2d(c, hidden, kernel_size=3, padding=1), nn.BatchNorm2d(hidden), nn.ReLU(inplace=True), nn.MaxPool2d(2)]
+            c = hidden
+            hidden = max(16, hidden * 2)
+        self.backbone = nn.Sequential(*layers)
+        self.gap = nn.AdaptiveAvgPool2d((1,1))
+        if task == "regression":
+            out_dim = max(1, int(num_classes))
+        else:
+            out_dim = max(2, int(num_classes))
+        self.head = nn.Sequential(nn.Dropout(p), nn.Linear(c, out_dim))
+        self.task = task
+
+    def forward(self, x):
+        x = self.backbone(x)
+        x = self.gap(x)
+        x = torch.flatten(x, 1)
+        return self.head(x)
+
+
+def build_model(task: str, num_classes: int, input_size: int, spec: dict) -> nn.Module:
+    hidden = int(spec.get("hidden", 64) or 64)
+    depth = int(spec.get("depth", 3) or 3)
+    p = float(spec.get("dropout_p", 0.2) or 0.2)
+    return GeneratedModel(in_ch=3, num_classes=num_classes, task=str(task or "classification"), hidden=hidden, depth=depth, p=p)
+"""
+
+
+def write_generated_model(description: str, out: Optional[Path] = None) -> Path:
+    """Write a tiny generated model module; description can tweak hidden/depth/dropout.
+    Description parsing is minimal; spec fields control details at build time.
+    """
+    out = out or Path(__file__).parent / "generated_model.py"
+    out.write_text(MODEL_TEMPLATE, encoding="utf-8")
+    return out
+
+
+def sanity_check_generated_model() -> bool:
+    """Compile/import the generated_model and attempt a tiny forward pass.
+    Returns True if successful; False otherwise.
+    """
+    import py_compile
+    p = Path(__file__).parent / "generated_model.py"
+    if not p.exists():
+        return False
+    try:
+        py_compile.compile(str(p), doraise=True)
+        try:
+            mod = _import_from_path(p, "_generated_model_runtime")
+            build = getattr(mod, "build_model", None)
+            if build is None:
+                return False
+            import torch  # type: ignore
+            m = build("classification", 2, 224, {"hidden": 16, "depth": 2})
+            m.eval()
+            with torch.no_grad():
+                _ = m(torch.zeros(1,3,64,64))
+            return True
+        except Exception:
+            return False
+    except Exception:
+        return False

@@ -88,6 +88,12 @@ FORBIDDEN_TOKENS = [
     "shutil", "Path(", "torch.hub", "socket", "http", "mlflow",
 ]
 
+ALLOWED_IMPORTS = {
+    ("torchvision", "transforms"),
+    ("torch", None),
+    ("torch.nn", None),
+}
+
 
 def _extract_blocks(text: str) -> List[Tuple[str, str]]:
     """Extract (kind, content) pairs where kind in {python, REPLACE, EDIT}.
@@ -125,6 +131,30 @@ def _is_safe(code: str) -> bool:
         return False
     if code.count("import ") > 12:
         return False
+    # AST-based import whitelist (best-effort)
+    try:
+        import ast
+        tree = ast.parse(code)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for n in node.names:
+                    mod = (n.name or "").strip()
+                    ok = any((mod == m if sub is None else mod == m) for m, sub in ALLOWED_IMPORTS)
+                    if not ok:
+                        return False
+            elif isinstance(node, ast.ImportFrom):
+                mod = (node.module or "").strip()
+                name_set = {alias.name for alias in node.names}
+                allowed = False
+                for m, sub in ALLOWED_IMPORTS:
+                    if mod == m and (sub is None or sub in name_set):
+                        allowed = True
+                        break
+                if not allowed:
+                    return False
+    except Exception:
+        # On AST failure, fall back to token checks only
+        pass
     # Must define expected symbols
     needed = ["def build_train_transforms", "def build_model_head", "def update_spec"]
     return all(k in code for k in needed)

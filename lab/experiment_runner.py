@@ -43,6 +43,12 @@ def dataset_choice() -> str:
 
 
 def _run_real(spec: Dict[str, Any]) -> Dict[str, Any]:
+    # Normalize/validate spec (optional dependency)
+    try:
+        from lab.spec_validation import normalize_spec as _normalize_spec
+        spec = _normalize_spec(spec)
+    except Exception:
+        pass
     # Verbose: show spec summary before attempting real/stub run
     if is_verbose():
         try:
@@ -111,10 +117,14 @@ def _run_real(spec: Dict[str, Any]) -> Dict[str, Any]:
     except Exception:
         gtrain = None
 
-    train_transforms = [
-        transforms.Resize((input_size, input_size)),
-        transforms.RandomHorizontalFlip(),
-    ]
+    # Control default augmentation via spec.use_default_augmentation (True by default)
+    try:
+        use_default_aug = bool(spec.get("use_default_augmentation", True))
+    except Exception:
+        use_default_aug = True
+    train_transforms = [transforms.Resize((input_size, input_size))]
+    if use_default_aug:
+        train_transforms.append(transforms.RandomHorizontalFlip())
     # Use generated augmentation only when novelty component is enabled
     nc = spec.get("novelty_component") or {}
     if aug_callable is not None and bool(nc.get("enabled", False)):
@@ -307,111 +317,411 @@ def _run_real(spec: Dict[str, Any]) -> Dict[str, Any]:
             vprint(res["reason"])
         return res
 
-    dl_train = DataLoader(ds_train, batch_size=batch_size, shuffle=True, num_workers=0)
-    dl_val = DataLoader(ds_val, batch_size=batch_size, shuffle=False, num_workers=0)
-    dl_test = DataLoader(ds_test, batch_size=batch_size, shuffle=False, num_workers=0)
+    # DataLoader tuning via spec/config
+    try:
+        nworkers = int(spec.get("num_workers", int(get("dataset.num_workers", 0) or 0)))
+    except Exception:
+        nworkers = 0
+    use_cuda = (hasattr(torch, "cuda") and torch.cuda.is_available())
+    try:
+        pin_memory = bool(spec.get("pin_memory", use_cuda))
+    except Exception:
+        pin_memory = bool(use_cuda)
+    try:
+        persistent_workers = bool(spec.get("persistent_workers", (nworkers > 0)))
+    except Exception:
+        persistent_workers = (nworkers > 0)
+
+    dl_train = DataLoader(
+        ds_train,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=nworkers,
+        pin_memory=pin_memory,
+        persistent_workers=persistent_workers if nworkers > 0 else False,
+    )
+    dl_val = DataLoader(
+        ds_val,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=max(0, nworkers // 2),
+        pin_memory=pin_memory,
+        persistent_workers=persistent_workers if nworkers > 0 else False,
+    )
+    dl_test = DataLoader(
+        ds_test,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=max(0, nworkers // 2),
+        pin_memory=pin_memory,
+        persistent_workers=persistent_workers if nworkers > 0 else False,
+    )
+
+    # Infer task (classification|regression|detection|segmentation) with overrides
+    def _infer_task_from_sample() -> str:
+        try:
+            sample = ds_train[0]
+            yb = sample[1] if isinstance(sample, (list, tuple)) and len(sample) > 1 else sample
+            if isinstance(yb, dict) and ("boxes" in yb or "labels" in yb):
+                return "detection"
+            import torch as _torch  # type: ignore
+            if _torch.is_tensor(yb):
+                if yb.dtype.is_floating_point and (yb.ndim == 0 or yb.ndim == 1):
+                    return "regression"
+                if yb.ndim >= 2:
+                    return "segmentation"
+            return "classification"
+        except Exception:
+            return "classification"
+
+    task = str(spec.get("task") or "").strip().lower() or _infer_task_from_sample()
 
     device = "cuda" if hasattr(torch, "cuda") and torch.cuda.is_available() else "cpu"
+    # Optional deterministic mode for cudnn
+    try:
+        if bool(spec.get("deterministic", False)) and hasattr(torch, "backends") and hasattr(torch.backends, "cudnn"):
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
+    except Exception:
+        pass
     # Model selection (keep minimal)
     model_name = str(spec.get("model") or "resnet18").lower()
     if model_name == "resnet18":
         model = resnet18(weights=None)
     else:
         model = resnet18(weights=None)
-    # Use generated head if requested and available
-    use_gen_head = bool(spec.get("use_generated_head", False))
-    if use_gen_head:
-        try:
-            from lab.codegen_utils import sanity_check_generated_head  # type: ignore
-            if sanity_check_generated_head():
-                from lab.generated_head import GeneratedHead  # type: ignore
-                p = float(spec.get("dropout_p", 0.2))
-                model.fc = GeneratedHead(model.fc.in_features, int(num_classes), p)
-            else:
+    # Heads + losses per task
+    if task == "regression":
+        out_dim = int(spec.get("num_outputs", 1) or 1)
+        model.fc = nn.Linear(model.fc.in_features, out_dim)
+        # Optional loss override for regression
+        loss_name = str(spec.get("loss") or "").strip().lower()
+        if loss_name in {"l1", "mae"}:
+            loss_fn = nn.L1Loss()
+        elif loss_name in {"huber", "smooth_l1"}:
+            loss_fn = nn.SmoothL1Loss()
+        else:
+            loss_fn = nn.MSELoss()
+    else:  # classification (default)
+        use_gen_head = bool(spec.get("use_generated_head", False))
+        if use_gen_head:
+            try:
+                from lab.codegen_utils import sanity_check_generated_head  # type: ignore
+                if sanity_check_generated_head():
+                    from lab.generated_head import GeneratedHead  # type: ignore
+                    p = float(spec.get("dropout_p", 0.2))
+                    model.fc = GeneratedHead(model.fc.in_features, int(num_classes), p)
+                else:
+                    model.fc = nn.Linear(model.fc.in_features, int(num_classes))
+            except Exception:
                 model.fc = nn.Linear(model.fc.in_features, int(num_classes))
-        except Exception:
+        else:
             model.fc = nn.Linear(model.fc.in_features, int(num_classes))
-    else:
-        model.fc = nn.Linear(model.fc.in_features, int(num_classes))
-    # Advanced hook may override head entirely
-    if gtrain is not None and hasattr(gtrain, "build_model_head"):
-        try:
-            head = gtrain.build_model_head(int(model.fc.in_features), int(num_classes))  # type: ignore[attr-defined]
-            if head is not None:
-                model.fc = head
-        except Exception:
-            pass
+        # Advanced hook may override head entirely
+        if gtrain is not None and hasattr(gtrain, "build_model_head"):
+            try:
+                head = gtrain.build_model_head(int(model.fc.in_features), int(num_classes))  # type: ignore[attr-defined]
+                if head is not None:
+                    model.fc = head
+            except Exception:
+                pass
+        # Optional loss override for classification
+        loss_name = str(spec.get("loss") or "").strip().lower()
+        if loss_name in {"bce", "bcewithlogits"}:
+            loss_fn = nn.BCEWithLogitsLoss()
+        else:
+            loss_fn = nn.CrossEntropyLoss()
     model.to(device)
 
     lr = float(spec.get("lr") or 1e-3)
     optimizer_name = str(spec.get("optimizer") or "adam").lower()
     if optimizer_name == "sgd":
         opt = torch.optim.SGD(model.parameters(), lr=lr, momentum=0.9)
+    elif optimizer_name == "adamw":
+        opt = torch.optim.AdamW(model.parameters(), lr=lr)
     else:
         opt = torch.optim.Adam(model.parameters(), lr=lr)
-    loss_fn = nn.CrossEntropyLoss()
+
+    # Optional class weights for classification
+    class_weights = None
+    if task != "regression":
+        cw = spec.get("class_weights")
+        if isinstance(cw, list) and num_classes and len(cw) == int(num_classes):
+            try:
+                import torch as _torch
+                class_weights = _torch.tensor([float(x) for x in cw], dtype=_torch.float32).to(device)
+            except Exception:
+                class_weights = None
+        # Apply weights only for CE when no explicit loss override is requested
+        try:
+            loss_name = str(spec.get("loss") or "").strip().lower()
+        except Exception:
+            loss_name = ""
+        if loss_name in {"", "ce", "cross_entropy"}:
+            loss_fn = nn.CrossEntropyLoss(weight=class_weights)
+
+    # Optional LR scheduler (step or cosine)
+    sched = None
+    try:
+        sched_name = str(spec.get("lr_scheduler") or "").lower()
+        if sched_name == "step":
+            step_size = int(spec.get("lr_step_size") or 50)
+            gamma = float(spec.get("lr_gamma") or 0.1)
+            sched = torch.optim.lr_scheduler.StepLR(opt, step_size=step_size, gamma=gamma)
+        elif sched_name == "cosine":
+            tmax = int(spec.get("lr_tmax") or max(1, int(spec.get("max_train_steps") or 50)))
+            sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=tmax)
+    except Exception:
+        sched = None
+
+    # Mixed precision (AMP) optional
+    use_amp = bool(spec.get("amp", False)) and device == "cuda"
+    scaler = None
+    if use_amp:
+        try:
+            from torch.cuda.amp import GradScaler  # type: ignore
+            scaler = GradScaler()
+        except Exception:
+            scaler = None
 
     started = _now()
     model.train()
     max_train_steps = int(spec.get("max_train_steps") or 50)
     step = 0
+    early_patience = int(spec.get("early_stopping_patience") or 0)
+    best_val = None
+    no_improve = 0
+    grad_clip = float(spec.get("grad_clip_norm") or 0.0)
     for epoch in range(epochs):
         for xb, yb in dl_train:
-            xb = xb.to(device)
-            yb = yb.to(device)
+            xb = xb.to(device, non_blocking=True)
+            yb = yb.to(device, non_blocking=True) if hasattr(yb, "to") else yb
             opt.zero_grad()
-            logits = model(xb)
-            loss = loss_fn(logits, yb)
-            loss.backward()
-            opt.step()
+            if use_amp and scaler is not None:
+                try:
+                    from torch.cuda.amp import autocast  # type: ignore
+                except Exception:
+                    autocast = None  # type: ignore
+            else:
+                autocast = None  # type: ignore
+            if autocast is not None:
+                with autocast():
+                    logits = model(xb)
+                    if task == "regression":
+                        import torch as _torch  # type: ignore
+                        yb_f = yb.float().view(logits.shape[0], -1)
+                        if yb_f.shape[1] != logits.shape[1]:
+                            want = logits.shape[1]
+                            yb_f = yb_f[:, :want] if yb_f.shape[1] > want else _torch.nn.functional.pad(yb_f, (0, want - yb_f.shape[1]))
+                        loss = loss_fn(logits, yb_f)
+                    else:
+                        loss = loss_fn(logits, yb)
+            else:
+                logits = model(xb)
+                if task == "regression":
+                    # Align shapes
+                    import torch as _torch  # type: ignore
+                    yb_f = yb.float().view(logits.shape[0], -1)
+                    if yb_f.shape[1] != logits.shape[1]:
+                        # best-effort broadcast/clip
+                        want = logits.shape[1]
+                        yb_f = yb_f[:, :want] if yb_f.shape[1] > want else _torch.nn.functional.pad(yb_f, (0, want - yb_f.shape[1]))
+                    loss = loss_fn(logits, yb_f)
+                else:
+                    loss = loss_fn(logits, yb)
+            if use_amp and scaler is not None:
+                scaler.scale(loss).backward()
+                if grad_clip and grad_clip > 0:
+                    try:
+                        scaler.unscale_(opt)
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
+                    except Exception:
+                        pass
+                scaler.step(opt)
+                try:
+                    scaler.update()
+                except Exception:
+                    pass
+            else:
+                loss.backward()
+                if grad_clip and grad_clip > 0:
+                    try:
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
+                    except Exception:
+                        pass
+                opt.step()
+            if sched is not None:
+                try:
+                    sched.step()
+                except Exception:
+                    pass
             step += 1
+            # Optional progress logging
+            try:
+                log_interval = int(spec.get("log_interval", 0) or 0)
+            except Exception:
+                log_interval = 0
+            if log_interval and (step % log_interval == 0) and is_verbose():
+                try:
+                    vprint(f"step={step} loss={float(loss.item()):.4f} lr={float(opt.param_groups[0].get('lr', 0.0)):.2e}")
+                except Exception:
+                    vprint(f"step={step} loss={float(loss)}")
             if step >= max_train_steps:
                 break
+        # Early stopping (epoch-level)
+        if early_patience > 0:
+            try:
+                model.eval()
+                if task == "regression":
+                    import torch as _torch
+                    se_sum_e, n_val_e = 0.0, 0
+                    with torch.no_grad():
+                        for xb, yb in dl_val:
+                            xb = xb.to(device)
+                            y = (yb if not hasattr(yb, "to") else yb).detach().cpu().float()
+                            yhat = model(xb).detach().cpu().float()
+                            se_sum_e += float(((yhat.view_as(y) - y) ** 2).sum().item())
+                            n_val_e += int(y.numel())
+                    cur = se_sum_e / n_val_e if n_val_e else float("inf")
+                    better = (best_val is None) or (cur < best_val)
+                else:
+                    correct_e, total_e = 0, 0
+                    with torch.no_grad():
+                        for xb, yb in dl_val:
+                            xb = xb.to(device)
+                            yb = yb.to(device)
+                            pred = model(xb).argmax(dim=1)
+                            correct_e += (pred == yb).sum().item()
+                            total_e += yb.numel()
+                    cur = float(correct_e) / float(total_e) if total_e else 0.0
+                    better = (best_val is None) or (cur > best_val)
+                if better:
+                    best_val = cur
+                    no_improve = 0
+                else:
+                    no_improve += 1
+                model.train()
+                if no_improve >= early_patience:
+                    break
+            except Exception:
+                pass
         if step >= max_train_steps:
             break
 
     # Validate (val split)
     model.eval()
-    correct = 0
-    total = 0
-    with torch.no_grad():
-        for xb, yb in dl_val:
-            xb = xb.to(device)
-            yb = yb.to(device)
-            logits = model(xb)
-            pred = logits.argmax(dim=1)
-            correct += (pred == yb).sum().item()
-            total += yb.numel()
-    val_acc = float(correct) / float(total) if total else 0.0
+    if task == "regression":
+        import torch as _torch  # type: ignore
+        se_sum = 0.0
+        ae_sum = 0.0
+        n_val = 0
+        y_all = []
+        yhat_all = []
+        with torch.no_grad():
+            for xb, yb in dl_val:
+                xb = xb.to(device)
+                logits = model(xb)
+                yhat = logits.detach().cpu().float().view(logits.shape[0], -1)
+                y = (yb if not hasattr(yb, "to") else yb).detach().cpu().float().view(yhat.shape[0], -1)
+                y_all.append(y)
+                yhat_all.append(yhat)
+                se_sum += float(((yhat - y) ** 2).sum().item())
+                ae_sum += float((yhat - y).abs().sum().item())
+                n_val += int(y.numel())
+        mse = se_sum / n_val if n_val else 0.0
+        mae = ae_sum / n_val if n_val else 0.0
+        rmse = mse ** 0.5
+        try:
+            y_cat = _torch.cat(y_all, dim=0)
+            yhat_cat = _torch.cat(yhat_all, dim=0)
+            y_mean = y_cat.mean()
+            ss_res = ((yhat_cat - y_cat) ** 2).sum()
+            ss_tot = ((y_cat - y_mean) ** 2).sum()
+            r2 = float(1.0 - (ss_res / (ss_tot + 1e-8)).item())
+        except Exception:
+            r2 = 0.0
+        val_acc = 0.0  # keep interface for downstream
+    else:
+        correct = 0
+        total = 0
+        with torch.no_grad():
+            for xb, yb in dl_val:
+                xb = xb.to(device)
+                yb = yb.to(device)
+                logits = model(xb)
+                pred = logits.argmax(dim=1)
+                correct += (pred == yb).sum().item()
+                total += yb.numel()
+        val_acc = float(correct) / float(total) if total else 0.0
 
     # Test evaluation
-    correct_t = 0
-    total_t = 0
-    with torch.no_grad():
-        for xb, yb in dl_test:
-            xb = xb.to(device)
-            yb = yb.to(device)
-            logits = model(xb)
-            pred = logits.argmax(dim=1)
-            correct_t += (pred == yb).sum().item()
-            total_t += yb.numel()
-    test_acc = float(correct_t) / float(total_t) if total_t else 0.0
+    if task == "regression":
+        import torch as _torch  # type: ignore
+        se_sum_t = 0.0
+        ae_sum_t = 0.0
+        n_test = 0
+        with torch.no_grad():
+            for xb, yb in dl_test:
+                xb = xb.to(device)
+                logits = model(xb)
+                yhat = logits.detach().cpu().float().view(logits.shape[0], -1)
+                y = (yb if not hasattr(yb, "to") else yb).detach().cpu().float().view(yhat.shape[0], -1)
+                se_sum_t += float(((yhat - y) ** 2).sum().item())
+                ae_sum_t += float((yhat - y).abs().sum().item())
+                n_test += int(y.numel())
+        mse_t = se_sum_t / n_test if n_test else 0.0
+        mae_t = ae_sum_t / n_test if n_test else 0.0
+        rmse_t = mse_t ** 0.5
+        test_acc = 0.0
+    else:
+        correct_t = 0
+        total_t = 0
+        with torch.no_grad():
+            for xb, yb in dl_test:
+                xb = xb.to(device)
+                yb = yb.to(device)
+                logits = model(xb)
+                pred = logits.argmax(dim=1)
+                correct_t += (pred == yb).sum().item()
+                total_t += yb.numel()
+        test_acc = float(correct_t) / float(total_t) if total_t else 0.0
 
     finished = _now()
+    # Build result with task-aware metrics
+    metrics: Dict[str, Any]
+    if task == "regression":
+        metrics = {
+            "val_accuracy": val_acc,  # kept for interface compatibility (0.0)
+            "test_accuracy": test_acc,  # kept for interface compatibility (0.0)
+            "val_mse": mse,
+            "val_mae": mae,
+            "val_rmse": rmse,
+            "val_r2": r2,
+            "test_mse": mse_t,
+            "test_mae": mae_t,
+            "test_rmse": rmse_t,
+        }
+    else:
+        metrics = {"val_accuracy": val_acc, "test_accuracy": test_acc}
+
     res = {
         "mode": "real",
         "reason": "ok",
         "started": started,
         "finished": finished,
-        "metrics": {"val_accuracy": val_acc, "test_accuracy": test_acc},
+        "metrics": metrics,
         "meta": {
             "device": device,
             "num_classes": num_classes,
             "seed": seed,
+            "task": task,
         },
     }
     if is_verbose():
-        vprint(f"Completed real run: val_acc={val_acc:.4f} test_acc={test_acc:.4f} device={device}")
+        if task == "regression":
+            vprint(f"Completed real run (regression): val_mse={mse:.4f} val_r2={r2:.4f} device={device}")
+        else:
+            vprint(f"Completed real run: val_acc={val_acc:.4f} test_acc={test_acc:.4f} device={device}")
     return res
 
 

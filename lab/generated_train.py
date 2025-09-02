@@ -1,120 +1,132 @@
-# training_hooks.py
-# Small training hooks file with a minimal multimodal fusion head that
-# implements learnable per-modality gating as the novelty component.
-# The file exposes exactly three functions:
-# - build_train_transforms(input_size)
-# - build_model_head(in_features, num_classes)
-# - update_spec(spec)
-
+# Tiny training hooks for ResNet18 + Scale-Selective Spectral Attention (SSSA)
+# Allowed building blocks: torchvision transforms and torch.nn layers only.
 import torch
 import torch.nn as nn
-import torchvision.transforms as T
+from typing import Any
+try:
+    import torchvision.transforms as T  # type: ignore
+except Exception:
+    T = None  # type: ignore
 
-def build_train_transforms(input_size):
+def build_train_transforms(input_size: int):
     """
-    Build a small set of training transforms.
-    Keep transforms simple and deterministic within randomness bounds.
-    Allowed transforms used: Resize, RandomHorizontalFlip, ColorJitter, ToTensor.
+    Training augmentation is not predefined here.
+    Return None to let the runner/config decide, or optionally return a
+    torchvision transforms.Compose constructed by the caller.
     """
-    return T.Compose([
-        T.Resize((input_size, input_size)),
-        T.RandomHorizontalFlip(p=0.5),
-        T.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1, hue=0.02),
-        T.ToTensor(),
-    ])
+    _ = int(max(96, min(512, int(input_size))))  # normalize but unused
+    return None
 
 
-def build_model_head(in_features, num_classes):
+def build_model_head(in_features: int, num_classes: int) -> nn.Module:
     """
-    Build a fusion head module that:
-    - Holds two learnable scalar parameters s_closeup and s_hfus (initialized to 0).
-      g = sigmoid(s) yields initial g=0.5.
-    - Projects HFUS pooled features to the same pooled-dim (in_features).
-    - Computes fused pooled = (g_c * pool_c + g_h * pool_h) / max(g_c + g_h, 0.01).
-    - Adds an L1 regularizer on the gates (coeff = 1e-3).
-    - Clamps gate values to [0.05, 0.95] for the first 30 steps to stabilize training.
-    The returned module forward accepts (pool_closeup, pool_hfus, step=0) and returns
-    (logits, reg_loss) where reg_loss is the L1 regularization scalar tensor.
+    Small classification head. Kept intentionally compact so that any
+    additional novelty parameters (SSSA) can remain <= ~10% of baseline params.
+    Uses only torch.nn layers.
     """
-    class FusionHead(nn.Module):
-        def __init__(self, in_features, num_classes, clamp_steps=30, l1_coeff=1e-3):
-            super().__init__()
-            # scalar parameters (initialized zero so sigmoid(0)=0.5)
-            self.s_closeup = nn.Parameter(torch.zeros(1))
-            self.s_hfus = nn.Parameter(torch.zeros(1))
-            # project HFUS pooled vector to the same dim (if needed)
-            self.hfus_proj = nn.Linear(in_features, in_features)
-            # simple linear classifier on the fused pooled vector
-            self.classifier = nn.Linear(in_features, num_classes)
-            # configuration
-            self.clamp_steps = int(clamp_steps)
-            self.l1_coeff = float(l1_coeff)
-
-        def forward(self, pool_closeup, pool_hfus, step=0):
-            """
-            pool_closeup: Tensor [B, in_features] pooled from ResNet18 global pool
-            pool_hfus:    Tensor [B, in_features] pooled from UNet-small encoder (before projection)
-            step:         int training step used to decide clamping
-            Returns: (logits [B, num_classes], reg_loss scalar tensor)
-            """
-            # project HFUS pooled features
-            pool_hfus_proj = self.hfus_proj(pool_hfus)
-
-            # compute gates
-            g_c = torch.sigmoid(self.s_closeup)  # scalar tensor
-            g_h = torch.sigmoid(self.s_hfus)
-
-            # clamp gates during early steps to stabilize (clamp in value space)
-            if int(step) < self.clamp_steps:
-                g_c = torch.clamp(g_c, min=0.05, max=0.95)
-                g_h = torch.clamp(g_h, min=0.05, max=0.95)
-
-            # safe denominator
-            denom = torch.clamp(g_c + g_h, min=0.01)
-
-            # fused pooled vector (broadcasting scalar gates over batch)
-            fused = (g_c * pool_closeup + g_h * pool_hfus_proj) / denom
-
-            logits = self.classifier(fused)
-
-            # L1 regularizer on gate values (use the post-sigmoid values)
-            reg_loss = self.l1_coeff * (g_c.abs() + g_h.abs())
-
-            # return logits and the regularization term (scalar tensor)
-            return logits, reg_loss
-
-    return FusionHead(in_features, num_classes)
+    # Small hidden projection: scale with input but floor to keep it tiny.
+    hidden = int(max(32, min(128, max(1, int(in_features * 0.05)))))
+    head = nn.Sequential(
+        nn.Linear(in_features, hidden),
+        nn.ReLU(inplace=True),
+        nn.Linear(hidden, num_classes),
+    )
+    return head
 
 
-def update_spec(spec):
+def update_spec(spec: dict) -> dict:
     """
-    Update the experiment spec with concrete novelty hyperparameters and ensure
-    safe ranges remain respected. Modifies the spec in-place and also returns it.
+    Update the run spec to include succinct SSSA (Scale-Selective Spectral Attention)
+    configuration and enforce safe numeric ranges.
+
+    SSSA summary (stored under spec['novelty_component']['sssa_params']):
+      - block_size: 8 (non-overlapping 8x8 DCT blocks on normalized input)
+      - bands: partition zig-zag flattened block into low=6, mid=12, high=(remaining)
+      - target_scales: ['layer2','layer3','layer4'] (ResNet intermediate outputs)
+      - per-band 1x1 conv projections are bilinearly upsampled to each scale spatial size
+      - per-(band x channel) scalar gates are learned (init=1.0) with L1 reg lambda=1e-4
+      - parameter increase target: <= 0.10 (10%) of baseline; projection widths must be reduced as needed
+      - enabled: True
+    Notes: The core model modifications are implemented as a lightweight spectral modulation
+    on multi-scale features and are intended to be applied before any fusion/pooling.
     """
-    # Ensure essential fields exist
-    spec = dict(spec)  # shallow copy to avoid surprising side-effects if needed
+    # Ensure basic numeric ranges are safe and deterministic
+    spec = dict(spec)  # shallow copy to avoid mutating caller data in-place
+    spec.setdefault('title', 'ResNet18 + Scale-Selective Spectral Attention (SSSA)')
+    # Clamp input size to allowed range
+    if 'input_size' in spec:
+        spec['input_size'] = int(max(96, min(512, int(spec['input_size']))))
+    # Clamp learning rate to safe range (1e-5 .. 1e-1)
+    if 'lr' in spec:
+        spec['lr'] = float(max(1e-5, min(1e-1, float(spec['lr']))))
+    # Clamp max_train_steps to safe range (10 .. 1000)
+    if 'max_train_steps' in spec:
+        spec['max_train_steps'] = int(max(10, min(1000, int(spec['max_train_steps']))))
+    # Ensure seed is present
+    spec.setdefault('seed', 42)
 
-    nc = spec.get("novelty_component", {})
-    nc = dict(nc)
-    nc.setdefault("description", "Learnable per-modality gating (close-up + HFUS).")
-    # Clamp duration and L1 coefficient used by the head
-    nc["gating_clamp_steps"] = 30
-    nc["gating_l1_coeff"] = 1e-3
-    nc["enabled"] = True
-    spec["novelty_component"] = nc
+    # Production defaults for common training toggles (safe, conservative)
+    def _truthy(x: Any) -> bool:
+        s = str(x).strip().lower()
+        return s in {"1", "true", "yes", "on"}
 
-    # Safety: ensure ranges are within allowed constraints
-    # input_size: 96..512
-    if "input_size" in spec:
-        spec["input_size"] = int(max(96, min(512, int(spec["input_size"]))))
-    # learning rate safe range 1e-5 .. 1e-1
-    if "lr" in spec:
-        spec["lr"] = float(max(1e-5, min(1e-1, float(spec["lr"]))))
-    # max_train_steps: 10..1000
-    if "max_train_steps" in spec:
-        spec["max_train_steps"] = int(max(10, min(1000, int(spec["max_train_steps"]))))
-    # keep batch_size positive
-    if "batch_size" in spec:
-        spec["batch_size"] = int(max(1, int(spec["batch_size"])))
+    # batch_size and optimizer defaults
+    try:
+        if 'batch_size' in spec:
+            spec['batch_size'] = int(max(1, min(1024, int(spec['batch_size']))))
+        else:
+            spec['batch_size'] = 16
+    except Exception:
+        spec['batch_size'] = 16
+    # Do not predefine optimizer here; leave to runner/config
+
+    # DataLoader hints
+    try:
+        if 'num_workers' in spec:
+            spec['num_workers'] = int(max(0, min(16, int(spec['num_workers']))))
+    except Exception:
+        spec['num_workers'] = 0
+    try:
+        spec['pin_memory'] = bool(spec['pin_memory']) if 'pin_memory' in spec else False
+    except Exception:
+        spec['pin_memory'] = False
+    try:
+        spec['persistent_workers'] = bool(spec['persistent_workers']) if 'persistent_workers' in spec else False
+    except Exception:
+        spec['persistent_workers'] = False
+
+    # Reproducibility and AMP
+    try:
+        spec['deterministic'] = _truthy(spec['deterministic']) if 'deterministic' in spec else False
+    except Exception:
+        spec['deterministic'] = False
+    try:
+        spec['amp'] = _truthy(spec['amp']) if 'amp' in spec else False
+    except Exception:
+        spec['amp'] = False
+    try:
+        if 'log_interval' in spec:
+            spec['log_interval'] = int(max(0, int(spec['log_interval'])))
+    except Exception:
+        pass
+
+    # Attach succinct SSSA config under novelty_component for downstream hooks
+    novelty = spec.get('novelty_component', {})
+    sssa_params = {
+        'enabled': True,
+        'description': 'Scale-Selective Spectral Attention (SSSA): 8x8 DCT blocks, '
+                       'zig-zag partitioning into low(6), mid(12), high(rest); '
+                       'per-band 1x1 projections + per-(band×channel) gates (init=1.0); '
+                       'L1 regularization lambda=1e-4; target param overhead <= 0.10.',
+        'block_size': 8,
+        'bands': {'low': 6, 'mid': 12, 'high': 'rest'},
+        'target_scales': ['layer2', 'layer3', 'layer4'],
+        'gate_init': 1.0,
+        'l1_lambda': 1e-4,
+        'param_overhead_fraction': 0.10,
+    }
+    novelty['sssa_params'] = sssa_params
+    novelty['enabled'] = True
+    spec['novelty_component'] = novelty
 
     return spec

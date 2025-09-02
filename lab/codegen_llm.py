@@ -71,7 +71,8 @@ def write_generated_aug_from_llm(description: str, extra_context: Optional[str] 
     sys_prompt = (
         "You are a careful ML engineer writing a tiny Python augmentation module.\n"
         "Define class GeneratedAug that wraps torchvision transforms.\n"
-        "WHITELIST ONLY: T.ColorJitter, T.RandomRotation, T.RandomErasing, T.GaussianBlur, T.RandomHorizontalFlip, T.Compose, T.Resize, T.ToTensor.\n"
+        "WHITELIST ONLY: T.ColorJitter, T.RandomRotation, T.RandomErasing, T.GaussianBlur, T.RandomHorizontalFlip, T.Compose, T.Resize.\n"
+        "Important: DO NOT include T.ToTensor(); the training pipeline appends it.\n"
         "Constraints: minimal imports; absolutely NO file I/O, NO network, NO training or model code, NO side effects.\n"
         "Output: ONLY a single Python fenced code block with the complete module."
     )
@@ -81,7 +82,7 @@ def write_generated_aug_from_llm(description: str, extra_context: Optional[str] 
         "except Exception:\n    T = None\n\n"
         "class GeneratedAug:\n"
         "    def __init__(self):\n"
-        "        if T is None:\n            self.pipe = None\n        else:\n            self.pipe = T.Compose([\n                # your transforms here\n            ])\n\n"
+        "        if T is None:\n            self.pipe = None\n        else:\n            self.pipe = T.Compose([\n                # your transforms here (no ToTensor)\n            ])\n\n"
         "    def __call__(self, x):\n        if self.pipe is None:\n            return x\n        return self.pipe(x)\n\n"
         "Choose transforms based on this description: '" + (description or "") + "'.\n"
         + ("Context: " + extra_context if extra_context else "") + "\n"
@@ -105,7 +106,79 @@ def write_generated_aug_from_llm(description: str, extra_context: Optional[str] 
         if _is_safe_aug_code(code):
             try:
                 _GEN_PATH.write_text(code, encoding="utf-8")
+                # Compile check (best-effort)
+                try:
+                    import py_compile
+                    py_compile.compile(str(_GEN_PATH), doraise=True)
+                except Exception:
+                    _GEN_PATH.unlink(missing_ok=True)
+                    return None
                 return _GEN_PATH
+            except Exception:
+                return None
+    return None
+
+
+# ---- LLM-generated model (safe subset) ----
+_GEN_MODEL_PATH = Path(__file__).parent / "generated_model.py"
+
+
+def _is_safe_model_code(code: str) -> bool:
+    """Very lightweight safety/shape checks for a generated model module."""
+    # Must define a build function and a nn.Module class
+    if "class GeneratedModel" not in code:
+        return False
+    if "def build_model(" not in code:
+        return False
+    # Ensure only safe imports
+    bad = ["requests.", "subprocess", "open(", "os.", "sys.", "socket", "urllib", "Path("]
+    if any(tok in code for tok in bad):
+        return False
+    if "import torch" not in code or "import torch.nn as nn" not in code:
+        return False
+    return True
+
+
+def write_generated_model_from_llm(description: str, extra_context: Optional[str] = None) -> Optional[Path]:
+    """Ask the LLM to generate a tiny classification/regression model module.
+    Returns the written path on success; None if generation failed.
+    """
+    sys_prompt = (
+        "You are a careful ML engineer writing a tiny PyTorch model module.\n"
+        "Define class GeneratedModel(nn.Module) using only: Conv2d, BatchNorm2d, ReLU, MaxPool2d, AdaptiveAvgPool2d, Dropout, Linear.\n"
+        "Also define build_model(task:str, num_classes:int, input_size:int, spec:dict)->nn.Module.\n"
+        "Constraints: no file/network/system I/O, no side effects; import only torch and torch.nn. Output a single Python fenced code block."
+    )
+    user_prompt = (
+        "Create a minimal CNN with GAP+Linear head; support task='classification' or 'regression' (set output dim accordingly).\n"
+        "Description: '" + (description or "") + "'\n"
+        + ("Context: " + extra_context if extra_context else "") + "\n"
+        "Return only a single Python fenced code block."
+    )
+    try:
+        model = get("pipeline.codegen.model", None)
+        profile = get("pipeline.codegen.llm", None)
+        text = chat_text_cached([
+            {"role": "system", "content": sys_prompt},
+            {"role": "user", "content": user_prompt},
+        ], temperature=0.2, model=model, profile=profile)
+    except LLMError:
+        return None
+    blocks = _extract_code_blocks(text)
+    if not blocks:
+        return None
+    for code in blocks:
+        if _is_safe_model_code(code):
+            try:
+                _GEN_MODEL_PATH.write_text(code, encoding="utf-8")
+                # Compile check
+                try:
+                    import py_compile
+                    py_compile.compile(str(_GEN_MODEL_PATH), doraise=True)
+                except Exception:
+                    _GEN_MODEL_PATH.unlink(missing_ok=True)
+                    return None
+                return _GEN_MODEL_PATH
             except Exception:
                 return None
     return None

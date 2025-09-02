@@ -111,6 +111,28 @@ def get_bool(key: str, default: bool = False) -> bool:
     return _truthy(val)
 
 
+def get_int(key: str, default: int = 0) -> int:
+    """Return an int value for the dotted key; fall back to default on any error."""
+    try:
+        val = get(key, None)
+        if val is None:
+            return int(default)
+        return int(val)
+    except Exception:
+        return int(default)
+
+
+def get_float(key: str, default: float = 0.0) -> float:
+    """Return a float value for the dotted key; fall back to default on any error."""
+    try:
+        val = get(key, None)
+        if val is None:
+            return float(default)
+        return float(val)
+    except Exception:
+        return float(default)
+
+
 def dataset_name(default: str = "isic") -> str:
     name = str(get("dataset.name", "") or "").strip().lower()
     if name:

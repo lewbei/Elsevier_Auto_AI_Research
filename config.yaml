@@ -53,9 +53,9 @@ pipeline:
   skip:
     find_papers: true
     summaries: true
-    novelty: false
+    novelty: true
     idea_blueprints: false
-    planner: false
+    planner: true
     iterate: false
     lit_review: true
     interactive: false

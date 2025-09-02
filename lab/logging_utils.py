@@ -102,6 +102,19 @@ def vprint(msg: str) -> None:
         print(f"[DBG {ts}] {msg}")
 
 
+def json_dumps_safe(obj: Any, default=str, indent: int = 2) -> str:
+    """Best-effort JSON dump that stringifies unsupported objects.
+    Intended only for logging and diagnostics.
+    """
+    try:
+        return json.dumps(obj, ensure_ascii=False, indent=indent, default=default)
+    except Exception:
+        try:
+            return json.dumps(str(obj), ensure_ascii=False, indent=indent)
+        except Exception:
+            return "{}"
+
+
 def try_mlflow_log(run_name: str, params: Dict[str, Any], metrics: Dict[str, Any], tags: Dict[str, Any] | None = None) -> None:
     """Best-effort MLflow logging. No-op if mlflow not installed or env disabled.
     Enable by setting MLFLOW_ENABLED=true and optionally MLFLOW_TRACKING_URI.

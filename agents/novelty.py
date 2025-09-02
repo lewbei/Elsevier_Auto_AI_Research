@@ -35,6 +35,53 @@ def _ensure_dirs() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
+# --- BEGIN: Tier-1 verbatim user-spec injection helper ---
+def _inject_user_claims(final: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Load ./data/user_spec.json (or env USER_SPEC_PATH) and inject verbatim fields
+    into `final` so downstream validators and blueprint builders quote your sentences.
+    Expected optional fields in the JSON: objective (str), hypotheses (list[str]),
+    success_criteria (list[dict]). Permissive: does not delete when missing.
+    """
+    import os as _os, json as _json, pathlib as _pl
+    p = _pl.Path(_os.getenv("USER_SPEC_PATH", "data/user_spec.json"))
+    if not p.exists():
+        return final
+    try:
+        spec = _json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return final
+
+    problems = list(final.get("problems") or [])
+    objectives = list(final.get("objectives") or [])
+    contributions = list(final.get("contributions") or [])
+    research_questions = list(final.get("research_questions") or [])
+
+    # Verbatim mapping (do NOT rewrite the user's sentences)
+    obj = spec.get("objective")
+    if isinstance(obj, str) and obj.strip():
+        problems = [obj.strip()] or problems
+        objectives = [obj.strip()] or objectives
+    for sc in (spec.get("success_criteria") or []):
+        try:
+            metric = str(sc.get("metric") or "").strip()
+            dvb = sc.get("delta_vs_baseline")
+            if metric and dvb is not None:
+                contributions.append(f"{metric} : Δ_vs_baseline = {dvb}")
+        except Exception:
+            continue
+    for h in (spec.get("hypotheses") or []):
+        if isinstance(h, str) and h.strip():
+            research_questions.append(h.strip())
+
+    final["problems"] = problems
+    final["objectives"] = objectives
+    final["contributions"] = contributions
+    final["research_questions"] = research_questions
+    return final
+# --- END: Tier-1 verbatim user-spec injection helper ---
+
+
 def _load_citations(csv_path: pathlib.Path) -> List[Dict[str, str]]:
     """Load citations from an optional CSV (abstract_screen_deepseek.csv)."""
     cites: List[Dict[str, str]] = []
@@ -988,6 +1035,11 @@ def main() -> None:
         "research_questions": outline.get("research_questions", []),
         "citations": outline.get("citations", []),
     }
+    # Ensure Tier-1 validator sees your sentences verbatim
+    try:
+        final = _inject_user_claims(final)
+    except Exception:
+        pass
     # Optional: produce an ideas-only report
     try:
         only_ideas = bool(get("pipeline.novelty.only_ideas", False))
