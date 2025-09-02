@@ -15,8 +15,10 @@ from lab.logging_utils import capture_env, try_mlflow_log
 from lab.report_html import write_dashboard
 from lab.mutations import propose_mutations  # type: ignore
 from lab.plot_utils import maybe_save_accuracy_bar  # type: ignore
+from lab.analysis import write_analysis_files
 from lab.config import get, get_bool
-from lab.config import dataset_path_for
+from lab.domain_templates import detect_domain, apply_template_defaults, prompt_block
+from lab.config import dataset_path_for, dataset_name, dataset_kind
 try:
     from agents.personas import DialogueManager  # type: ignore
 except Exception:
@@ -73,10 +75,34 @@ def _iter_persona_notes(context: Dict[str, Any]) -> List[str]:
 
 def propose_baseline_and_novelty(novelty: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
     topic = str(get("project.goal", "your task") or "your task")
+    # Detect domain and prepare template hints to steer proposals
+    domain = detect_domain(topic)
+    domain_text, domain_hints = prompt_block(domain)
+    # Select a top candidate (prefer tier1_score) to steer ablation design
+    def _pick_iter_candidate(panel: Dict[str, Any]) -> Dict[str, Any]:
+        items = []
+        for key in ("novelty_ideas", "new_ideas_detailed"):
+            xs = panel.get(key) or []
+            if isinstance(xs, list):
+                items.extend([x for x in xs if isinstance(x, dict)])
+            if items:
+                break
+        if not items:
+            return {}
+        try:
+            items.sort(key=lambda d: float(d.get("tier1_score", 0.0) or 0.0), reverse=True)
+        except Exception:
+            pass
+        return items[0] if items else {}
+    cand = _pick_iter_candidate(novelty)
+    # Dynamic dataset hint
+    ds_label = dataset_name("isic").upper()
+    ds_path = dataset_path_for()
+    ds_kind = (dataset_kind(None) or ("cifar10" if ds_label.lower() == "cifar10" else "imagefolder"))
     system = (
         "You are an AI scientist. Propose three minimal, runnable experiment specs: (1) baseline with standard components, \n"
         "(2) novelty variant incorporating exactly one concrete novelty, and (3) ablation that is identical to (2) but with novelty disabled.\n"
-        f"Target context: {topic}. Respect constraints: CPU/1 epoch/small steps. Return STRICT JSON adhering to the provided schema with explicit values.\n"
+        f"Target context: {topic}. {domain_text} Respect constraints: CPU/1 epoch/small steps. Return STRICT JSON adhering to the provided schema with explicit values.\n"
         "Self-check: Before responding, validate keys/types per output_schema and constraints; fix mismatches and return JSON only."
     )
     # Optionally include plan.json and persona notes (multi‑persona integration)
@@ -90,17 +116,21 @@ def propose_baseline_and_novelty(novelty: Dict[str, Any]) -> Tuple[Dict[str, Any
 
     user_payload = {
         "novelty_report": novelty,
+        "novelty_candidate": cand,
         "plan": plan_ctx,
         "persona_notes": persona_notes,
         "constraints": {
-            "dataset": "ImageFolder under data/isic with train/ and val/",
+            "dataset": f"{ds_kind} under {ds_path} with train/ and val/",
             "compute": "CPU or single GPU, <= 1 epoch, limit steps",
             "framework": "PyTorch if available, else allow stub",
+            "delta_vs_prior": str(cand.get("delta_vs_prior", "")),
         },
+        "domain": domain,
+        "template_hints": domain_hints,
         "output_schema": {
             "baseline": {
                 "title": "string",
-                "dataset_path": "data/isic",
+                "dataset_path": ds_path,
                 "input_size": 224,
                 "model": "resnet18",
                 "epochs": 1,
@@ -112,7 +142,7 @@ def propose_baseline_and_novelty(novelty: Dict[str, Any]) -> Tuple[Dict[str, Any
             },
             "novelty": {
                 "title": "string",
-                "dataset_path": "data/isic",
+                "dataset_path": ds_path,
                 "input_size": 224,
                 "model": "resnet18",
                 "epochs": 1,
@@ -124,7 +154,7 @@ def propose_baseline_and_novelty(novelty: Dict[str, Any]) -> Tuple[Dict[str, Any
             },
             "ablation": {
                 "title": "string",
-                "dataset_path": "data/isic",
+                "dataset_path": ds_path,
                 "input_size": 224,
                 "model": "resnet18",
                 "epochs": 1,
@@ -159,6 +189,17 @@ def propose_baseline_and_novelty(novelty: Dict[str, Any]) -> Tuple[Dict[str, Any
         }
 
     b, n, a = fill(baseline, "Baseline"), fill(novelty_spec, "Novelty"), fill(ablation, "Ablation")
+    # Apply domain template defaults conservatively
+    b = apply_template_defaults(b, domain)
+    n = apply_template_defaults(n, domain)
+    a = apply_template_defaults(a, domain)
+    # Ensure ablation describes same novelty but disabled even if LLM missed it
+    try:
+        nov_desc = str((n.get("novelty_component", {}) or {}).get("description", "") or "novelty")
+        a["novelty_component"] = {"description": nov_desc, "enabled": False}
+        n["novelty_component"] = {"description": nov_desc, "enabled": True}
+    except Exception:
+        pass
     n = _apply_novelty_desc_to_spec(n)
     return b, n, a
 
@@ -342,6 +383,7 @@ def iterate(novelty: Dict[str, Any], max_iters: int = 2) -> None:
     except Exception:
         pass
     baseline = novelty_spec = ablation = None
+    journal = EXPERIMENTS_DIR / "journal.jsonl"
     for it in range(1, max_iters + 1):
         if it == 1 or baseline is None:
             print(f"[ITER {it}] Proposing baseline/novelty/ablation specs…")
@@ -361,6 +403,18 @@ def iterate(novelty: Dict[str, Any], max_iters: int = 2) -> None:
         _write_json(EXPERIMENTS_DIR / f"{run_id}_baseline.json", baseline)
         _write_json(EXPERIMENTS_DIR / f"{run_id}_novelty.json", novelty_spec)
         _write_json(EXPERIMENTS_DIR / f"{run_id}_ablation.json", ablation)
+        # Journal entry (append line)
+        try:
+            with open(journal, "a", encoding="utf-8") as jfh:
+                jfh.write(json.dumps({
+                    "iter": it,
+                    "run_id": run_id,
+                    "baseline": {k: baseline.get(k) for k in ["title", "lr", "max_train_steps", "input_size", "model"]},
+                    "novelty": {"title": novelty_spec.get("title"), "novelty": novelty_spec.get("novelty_component", {})},
+                    "ablation": {k: ablation.get(k) for k in ["title", "model"]},
+                }, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
 
         # HITL confirmation gate for spec approval
         hitl = get_bool("pipeline.hitl.confirm", False) or (str(os.getenv("HITL_CONFIRM", "")).lower() in {"1", "true", "yes"})
@@ -379,6 +433,8 @@ def iterate(novelty: Dict[str, Any], max_iters: int = 2) -> None:
             return
 
         # Ensure generated modules exist for this iteration (safe defaults)
+        # Always define desc for later use (editor)
+        desc = ""
         try:
             desc = (novelty_spec.get("novelty_component", {}) or {}).get("description", "")
             # When LLM codegen is enabled, attempt to regenerate the aug module with richer context.
@@ -417,10 +473,23 @@ def iterate(novelty: Dict[str, Any], max_iters: int = 2) -> None:
             except Exception as _exc:
                 print(f"[CODEGEN] Editor exception: {_exc}")
 
+        # Optional update_spec hook from generated training module allows LLM to steer variants
+        def _maybe_update_spec(s: Dict[str, Any]) -> Dict[str, Any]:
+            try:
+                import lab.generated_train as gtrain  # type: ignore
+                if hasattr(gtrain, "update_spec"):
+                    s2 = gtrain.update_spec(dict(s))  # type: ignore[attr-defined]
+                    if isinstance(s2, dict):
+                        return s2
+            except Exception:
+                pass
+            return s
+
         # Breadth: base triplet plus a second model variant for each
         base_triplet = [("baseline", baseline), ("novelty", novelty_spec), ("ablation", ablation)]
         matrix: List[Tuple[str, Dict[str, Any]]] = []
         for name, spec in base_triplet:
+            spec = _maybe_update_spec(spec)
             matrix.append((name, spec))
             spec2 = dict(spec)
             spec2["model"] = "mobilenet_v3_small"
@@ -461,6 +530,17 @@ def iterate(novelty: Dict[str, Any], max_iters: int = 2) -> None:
                 for i in range(2, repeat_n + 1):
                     extra.append((f"{base_name}_rep{i}", dict(base_spec)))
             matrix.extend(extra)
+
+        # Cap total runs per iteration (ensure core triplet remains)
+        try:
+            max_runs = int(os.getenv("MAX_RUNS_PER_ITER", "0") or 0)
+        except Exception:
+            max_runs = 0
+        if max_runs and max_runs < len(matrix):
+            # Always keep baseline/novelty/ablation; trim extras
+            core = [x for x in matrix if x[0] in {"baseline", "novelty", "ablation"}]
+            extras = [x for x in matrix if x[0] not in {"baseline", "novelty", "ablation"}]
+            matrix = core + extras[: max(0, max_runs - len(core))]
 
         iter_results: List[Dict[str, Any]] = []
         start_ts = time.time()
@@ -562,6 +642,22 @@ def iterate(novelty: Dict[str, Any], max_iters: int = 2) -> None:
             _write_json(RUNS_DIR / "aggregates.json", aggs)
     except Exception:
         pass
+    # Automated analysis (deterministic + optional LLM)
+    try:
+        write_analysis_files(RUNS_DIR, all_runs, decision, PLAN_PATH, novelty_spec if 'novelty_spec' in locals() else None)
+    except Exception:
+        pass
+    # Optional: draft paper immediately after iterate if requested
+    try:
+        auto_paper = get_bool("pipeline.analysis.write_paper_after", False) or (str(os.getenv("WRITE_PAPER_AFTER_ITERATE", "")).lower() in {"1", "true", "yes"})
+    except Exception:
+        auto_paper = False
+    if auto_paper:
+        try:
+            import agents.write_paper as _writer  # type: ignore
+            _writer.main()
+        except Exception as _exc:
+            print(f"[WARN] Auto paper writer failed: {_exc}")
     print(f"[DONE] Wrote iteration report to {RUNS_DIR / 'report.md'}")
 
 

@@ -52,8 +52,8 @@ pipeline:
   # Skip stages automatically without CLI or env flags
   skip:
     find_papers: true
-    summaries: true
-    novelty: true
+    summaries: false
+    novelty: false
     idea_blueprints: false
     planner: false
     iterate: false
@@ -68,13 +68,22 @@ pipeline:
   # Summarize agent configuration
   summarize:
     llm: default          # profile alias
+    # Optional explicit model override for summarize; empty uses profile default
+    model: ""
     max_pages: 0          # 0 = no page limit
     max_chars: 0          # 0 = no character limit
-    pass1_chunk: 20000    # chars per chunk when chunking
+    pass1_chunk: 120000    # chars per chunk when chunking
     progress: true        # print high-level progress lines
-    detail: false         # print timing/details
+    detail: true         # print timing/details
     save_raw: false       # save intermediate JSON files (*.pass1.json, *.merged.json, ...)
+    print_raw: true       # print final LLM JSON (pre-validate) to console
     force_chunk: false    # force chunking instead of full-text pass
+    # Timeouts/retries (seconds/attempts). Full-text often needs longer.
+    timeout: 60           # per-call timeout for chunked requests
+    timeout_full: 180     # per-call timeout for full-text request
+    max_tries: 4          # retry attempts on 429/5xx/transient errors
+    # Enforce required presence of training knobs/metrics/dataset_details
+    enforce_required: true
 
   # Novelty agent configuration
   novelty:

@@ -15,8 +15,7 @@ API_KEY = os.getenv("ELSEVIER_KEY")
 INSTTOKEN = os.getenv("X_ELS_INSTTOKEN")  # optional; only if you actually have one
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")  # required for LLM relevance
 
-assert API_KEY, "ELSEVIER_KEY not set"
-assert DEEPSEEK_API_KEY, "DEEPSEEK_API_KEY not set"
+# Note: Avoid failing at import time. Validate credentials at call-sites instead.
 
 BASE_SD_SEARCH  = "https://api.elsevier.com/content/search/sciencedirect"
 BASE_SD_ARTICLE = "https://api.elsevier.com/content/article"          # /pii/{PII}
@@ -42,6 +41,8 @@ MAX_KEPT = 40
 # ---------------------------
 def _auth_headers(base: dict) -> dict:
     h = dict(base)
+    if not API_KEY:
+        raise RuntimeError("ELSEVIER_KEY not set")
     h["X-ELS-APIKey"] = API_KEY
     if INSTTOKEN:
         h["X-ELS-Insttoken"] = INSTTOKEN
@@ -197,6 +198,8 @@ def get_abstract(entry: dict) -> Optional[str]:
 # DEEPSEEK RELEVANCE
 # ---------------------------
 def judge_relevance_deepseek(title: str, abstract: str, query: str) -> Tuple[bool, str]:
+    if not DEEPSEEK_API_KEY:
+        return False, "DEEPSEEK_API_KEY not set"
     headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
     system_msg = (
         "You are a strict research assistant. "

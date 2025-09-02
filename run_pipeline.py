@@ -4,7 +4,7 @@ import time
 import subprocess
 import shutil
 from pathlib import Path
-from lab.config import get_bool
+from lab.config import get_bool, get
 from lab.logging_utils import get_log_level
 from dotenv import load_dotenv
 
@@ -157,7 +157,52 @@ def main() -> None:
         reason = "env SKIP_SUMMARIES" if skip_summaries else (f"found {sum_count} summaries under data/summaries/" + (" (fresh-run override disabled)" if not fresh_run else ""))
         print(f"[SKIP] Step 1.5 (summaries) skipped ({reason}).")
     else:
-        run_step(py, ["-m", "agents.summarize"], stage="summarize")  # new summaries-only agent
+        # Programmatic summaries using stage configuration from config.yaml
+        try:
+            from agents.summarize import process_pdfs
+            # Read stage config
+            max_pages = int(get("pipeline.summarize.max_pages", 0) or 0)
+            max_chars = int(get("pipeline.summarize.max_chars", 0) or 0)
+            chunk_size = int(get("pipeline.summarize.pass1_chunk", 20000) or 20000)
+            timeout = int(get("pipeline.summarize.timeout", 60) or 60)
+            max_tries = int(get("pipeline.summarize.max_tries", 4) or 4)
+            model = get("pipeline.summarize.model", None)
+            if isinstance(model, str) and not model.strip():
+                model = None
+            profile = get("pipeline.summarize.llm", None)
+            # Prefer full-text mode for GPT-5 mini
+            default_model = get("llm.default", None)
+            prof = str(profile or "").strip().lower()
+            md = str(model or "").strip().lower()
+            dm = str(default_model or "").strip().lower()
+            if (md.startswith("gpt-5-")) or (not md and prof == "default" and dm.startswith("gpt-5-")):
+                chunk_size = -1  # force single full-text pass
+            # Verbose if progress or detail enabled
+            verbose = bool(get("pipeline.summarize.progress", True) or get("pipeline.summarize.detail", False))
+
+            # Decide whether to skip existing summaries
+            skip_existing_cfg = get("pipeline.summarize.skip_existing", None)
+            if skip_existing_cfg is None:
+                skip_existing = (not fresh_run)
+            else:
+                skip_existing = bool(skip_existing_cfg)
+
+            wrote = process_pdfs(
+                pdf_dir=str(pdf_dir),
+                out_dir=str(sum_dir),
+                max_pages=max_pages,
+                max_chars=max_chars,
+                chunk_size=chunk_size,
+                timeout=timeout,
+                max_tries=max_tries,
+                model=model,
+                profile=profile,
+                verbose=verbose,
+                skip_existing=skip_existing,
+            )
+            print(f"[RUN] Summaries produced: {wrote}")
+        except Exception as exc:
+            raise SystemExit(f"Summaries step failed: {exc}")
 
     # 1.75) Literature review synthesized from summaries
     lit_path = HERE / "data" / "lit_review.md"

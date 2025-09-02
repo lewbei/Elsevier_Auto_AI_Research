@@ -1,25 +1,10 @@
 import os
 import json
-import pathlib
-import time
-from typing import Dict, Any, List
-from dotenv import load_dotenv
+from typing import Dict, Any, List, Optional
+from pathlib import Path
 
 from utils.pdf_utils import extract_text_from_pdf
-from utils.llm_utils import chat_json, LLMError, LLM_PROVIDER, LLM_MODEL, LLM_CHAT_URL
-from lab.config import get
-
-
-load_dotenv()
-
-DATA_DIR = pathlib.Path("data")
-SUM_DIR = DATA_DIR / "summaries"
-PDF_DIR = pathlib.Path("pdfs")
-
-
-def _ensure_dirs() -> None:
-    SUM_DIR.mkdir(parents=True, exist_ok=True)
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+from utils.llm_utils import chat_json, LLMError
 
 
 def _truncate(s: str, n: int) -> str:
@@ -44,7 +29,14 @@ def _as_dict(x: Any) -> Dict[str, Any]:
 
 # ---- All‑LLM 3‑pass extraction helpers ----
 
-def _llm_pass1_extraction(text: str, *, timeout: int | None = None, max_tries: int | None = None) -> Dict[str, Any]:
+def _llm_pass1_extraction(
+    text: str,
+    *,
+    timeout: Optional[int] = None,
+    max_tries: Optional[int] = None,
+    model: Optional[str] = None,
+    profile: Optional[str] = None,
+) -> Dict[str, Any]:
     system = (
         "You are an expert scientific information extractor. From the provided paper text only, produce a broad extraction pack JSON for downstream summarization. "
         "No outside knowledge. If something isn’t in the text, leave it blank. Keep each string under ~240 chars. Use normalized short names for models/metrics/datasets. JSON only."
@@ -85,34 +77,52 @@ def _llm_pass1_extraction(text: str, *, timeout: int | None = None, max_tries: i
             "For related_work, extract at most 12 entries grounded in the paper text (e.g., References and in-text comparisons). Use concise citation strings like 'Author et al., YEAR — note'.",
         ],
     }
-    model = os.getenv("SUM_MODEL") or (get("pipeline.summarize.model", None) if isinstance(get("pipeline.summarize.model", None), str) else None)
-    profile = get("pipeline.summarize.llm", None)
-    # Timeouts/retries are configurable; fall back to chat_json defaults when None
     kwargs: Dict[str, Any] = {}
     if timeout is not None:
         kwargs["timeout"] = int(timeout)
     if max_tries is not None:
         kwargs["max_tries"] = int(max_tries)
-    return chat_json(system, json.dumps(user, ensure_ascii=False), temperature=0.0, model=model, profile=profile, **kwargs)
+    if model is not None:
+        kwargs["model"] = model
+    if profile is not None:
+        kwargs["profile"] = profile
+    return chat_json(system, json.dumps(user, ensure_ascii=False), temperature=0.0, **kwargs)
 
 
-def _llm_pass2_gap_fill(text: str, pack: Dict[str, Any], *, timeout: int | None = None, max_tries: int | None = None) -> Dict[str, Any]:
+def _llm_pass2_gap_fill(
+    text: str,
+    pack: Dict[str, Any],
+    *,
+    timeout: Optional[int] = None,
+    max_tries: Optional[int] = None,
+    model: Optional[str] = None,
+    profile: Optional[str] = None,
+) -> Dict[str, Any]:
     system = (
         "You are a meticulous auditor. Given an extraction pack and the same paper text, fill only missing/uncertain fields. Do not change already-filled correct fields. "
         "If still not present in the text, keep blank and record in coverage_report.missing_after_second_pass. JSON only."
     )
     user = {"paper_text": text, "extraction_pack": pack}
-    model = os.getenv("SUM_MODEL") or (get("pipeline.summarize.model", None) if isinstance(get("pipeline.summarize.model", None), str) else None)
-    profile = get("pipeline.summarize.llm", None)
     kwargs: Dict[str, Any] = {}
     if timeout is not None:
         kwargs["timeout"] = int(timeout)
     if max_tries is not None:
         kwargs["max_tries"] = int(max_tries)
-    return chat_json(system, json.dumps(user, ensure_ascii=False), temperature=0.0, model=model, profile=profile, **kwargs)
+    if model is not None:
+        kwargs["model"] = model
+    if profile is not None:
+        kwargs["profile"] = profile
+    return chat_json(system, json.dumps(user, ensure_ascii=False), temperature=0.0, **kwargs)
 
 
-def _llm_merge_packs(packs: List[Dict[str, Any]], *, timeout: int | None = None, max_tries: int | None = None) -> Dict[str, Any]:
+def _llm_merge_packs(
+    packs: List[Dict[str, Any]],
+    *,
+    timeout: Optional[int] = None,
+    max_tries: Optional[int] = None,
+    model: Optional[str] = None,
+    profile: Optional[str] = None,
+) -> Dict[str, Any]:
     if len(packs) == 1:
         return packs[0]
     system = (
@@ -120,17 +130,19 @@ def _llm_merge_packs(packs: List[Dict[str, Any]], *, timeout: int | None = None,
         "Keep filled fields, dedupe lists, and preserve coverage_report notes. JSON only."
     )
     user = {"packs": packs}
-    model = os.getenv("SUM_MODEL") or (get("pipeline.summarize.model", None) if isinstance(get("pipeline.summarize.model", None), str) else None)
-    profile = get("pipeline.summarize.llm", None)
     kwargs: Dict[str, Any] = {}
     if timeout is not None:
         kwargs["timeout"] = int(timeout)
     if max_tries is not None:
         kwargs["max_tries"] = int(max_tries)
-    return chat_json(system, json.dumps(user, ensure_ascii=False), temperature=0.0, model=model, profile=profile, **kwargs)
+    if model is not None:
+        kwargs["model"] = model
+    if profile is not None:
+        kwargs["profile"] = profile
+    return chat_json(system, json.dumps(user, ensure_ascii=False), temperature=0.0, **kwargs)
 
 
-def _llm_pass3_finalize_schema(merged_pack: Dict[str, Any]) -> Dict[str, Any]:
+def _llm_pass3_finalize_schema(merged_pack: Dict[str, Any], *, model: Optional[str] = None, profile: Optional[str] = None) -> Dict[str, Any]:
     system = (
         "You are a strict JSON formatter. Convert the merged extraction pack into the EXACT target schema. No extra keys. Scalars must be strings; lists must be arrays of strings. "
         "Keep each list item concise (<240 chars). If a field is unknown, leave it empty ('' or []). JSON only."
@@ -195,12 +207,15 @@ def _llm_pass3_finalize_schema(merged_pack: Dict[str, Any]) -> Dict[str, Any]:
             "For related_work[], keep ≤12 entries; dedupe by DOI/title; include a short 'citation' string and optional DOI/URL when explicitly present; 'relation' should briefly explain the connection (baseline, similar method, prior SOTA)."
         ],
     }
-    model = os.getenv("SUM_MODEL") or (get("pipeline.summarize.model", None) if isinstance(get("pipeline.summarize.model", None), str) else None)
-    profile = get("pipeline.summarize.llm", None)
-    return chat_json(system, json.dumps(user, ensure_ascii=False), temperature=0.0, model=model, profile=profile)
+    kwargs: Dict[str, Any] = {}
+    if model is not None:
+        kwargs["model"] = model
+    if profile is not None:
+        kwargs["profile"] = profile
+    return chat_json(system, json.dumps(user, ensure_ascii=False), temperature=0.0, **kwargs)
 
 
-def _llm_meta_fill(text: str, pack: Dict[str, Any]) -> Dict[str, Any]:
+def _llm_meta_fill(text: str, pack: Dict[str, Any], *, model: Optional[str] = None, profile: Optional[str] = None) -> Dict[str, Any]:
     """Targeted meta/resources/reproducibility fill for missing fields only."""
     system = (
         "You are a meticulous auditor. Fill ONLY missing meta/resources/reproducibility fields using the provided text. "
@@ -220,12 +235,25 @@ def _llm_meta_fill(text: str, pack: Dict[str, Any]) -> Dict[str, Any]:
             "Short strings; JSON only.",
         ],
     }
-    model = os.getenv("SUM_MODEL") or (get("pipeline.summarize.model", None) if isinstance(get("pipeline.summarize.model", None), str) else None)
-    profile = get("pipeline.summarize.llm", None)
-    return chat_json(system, json.dumps(user, ensure_ascii=False), temperature=0.0, model=model, profile=profile)
+    kwargs: Dict[str, Any] = {}
+    if model is not None:
+        kwargs["model"] = model
+    if profile is not None:
+        kwargs["profile"] = profile
+    return chat_json(system, json.dumps(user, ensure_ascii=False), temperature=0.0, **kwargs)
 
 
-def summarize_paper(text: str, title_hint: str = "", file_stem: str | None = None) -> Dict[str, Any]:
+def summarize_paper(
+    text: str,
+    title_hint: str = "",
+    *,
+    chunk_size: int = 20000,
+    timeout: int = 60,
+    max_tries: int = 4,
+    model: Optional[str] = None,
+    profile: Optional[str] = None,
+    verbose: bool = False,
+) -> Dict[str, Any]:
     # Rich, highly-detailed summarization prompt with strict JSON output
     system = (
         "You are an expert research analyst and technical writer tasked with producing a rigorous, structured summary of a scientific paper from the provided text only.\n"
@@ -313,225 +341,58 @@ def summarize_paper(text: str, title_hint: str = "", file_stem: str | None = Non
             " Extract up to 12 related_work items from the paper text (References and in-text comparisons). Each should include a concise 'citation' string and optional DOI/URL if explicitly present."
         ),
     }
-    # All‑LLM 3‑pass flow with chunking support
-    # Pass 1: extraction per chunk
+    # All‑LLM 3‑pass flow with deterministic chunking (no offline fallbacks)
     full_text = text
-    packs: List[Dict[str, Any]] = []
-    # LLM timeout/retries controls (YAML first, env override)
-    try:
-        cfg_timeout = get("pipeline.summarize.timeout", None)
-        cfg_timeout_full = get("pipeline.summarize.timeout_full", None)
-        cfg_max_tries = get("pipeline.summarize.max_tries", None)
-    except Exception:
-        cfg_timeout = None
-        cfg_timeout_full = None
-        cfg_max_tries = None
-    try:
-        base_timeout = int(os.getenv("SUM_TIMEOUT", str(cfg_timeout if isinstance(cfg_timeout, int) else "60") ) or 60)
-    except Exception:
-        base_timeout = 60
-    try:
-        full_timeout = int(os.getenv("SUM_TIMEOUT_FULL", str(cfg_timeout_full if isinstance(cfg_timeout_full, int) else str(max(base_timeout, 120)))) or max(base_timeout, 120))
-    except Exception:
-        full_timeout = max(base_timeout, 120)
-    try:
-        max_tries = int(os.getenv("SUM_MAX_TRIES", str(cfg_max_tries if isinstance(cfg_max_tries, int) else "4")) or 4)
-    except Exception:
-        max_tries = 4
-    # If pass1_chunk <= 0, treat as "no chunking" when chunking is used.
-    try:
-        cfg_chunk = get("pipeline.summarize.pass1_chunk", None)
-        chunk_size = int(os.getenv("SUM_PASS1_CHUNK", str(cfg_chunk if isinstance(cfg_chunk, int) else "20000")) or 20000)
-    except Exception:
-        chunk_size = 20000
     if chunk_size <= 0:
         chunk_size = len(full_text) or 1
-    # Progress/detail toggles prefer YAML but allow env override
-    try:
-        yaml_progress = get("pipeline.summarize.progress", True)
-        show_progress = (str(os.getenv("SUM_PROGRESS", "")).lower() in {"1", "true", "yes", "on"}) or bool(yaml_progress)
-    except Exception:
-        show_progress = True
-    try:
-        yaml_detail = get("pipeline.summarize.detail", False)
-        show_detail = (str(os.getenv("SUM_DETAIL", "")).lower() in {"1", "true", "yes", "on"}) or bool(yaml_detail)
-    except Exception:
-        show_detail = False
-    # Print raw LLM JSON outputs (finalize step). Default = True. Env/YAML can disable.
-    try:
-        yaml_print_raw = get("pipeline.summarize.print_raw", True)
-    except Exception:
-        yaml_print_raw = True
-    _env_pr = str(os.getenv("SUM_PRINT_RAW", "")).lower()
-    if _env_pr in {"0", "false", "no", "off"}:
-        print_raw = False
-    elif _env_pr in {"1", "true", "yes", "on"}:
-        print_raw = True
+
+    packs: List[Dict[str, Any]] = []
+    if len(full_text) <= chunk_size:
+        if verbose:
+            print(f"[SUM] Pass1: 1 chunk (size={len(full_text)})")
+        pck = _llm_pass1_extraction(full_text, timeout=timeout, max_tries=max_tries, model=model, profile=profile)
+        packs.append(pck)
     else:
-        print_raw = bool(yaml_print_raw)
-    # Prefer a single full-text pass first, and only fall back to chunking on LLM error
-    try:
-        yaml_force = get("pipeline.summarize.force_chunk", False)
-        force_chunk = (str(os.getenv("SUM_FORCE_CHUNK", "")).lower() in {"1", "true", "yes", "on"}) or bool(yaml_force)
-    except Exception:
-        force_chunk = False
-    attempted_full = False
-    if not force_chunk:
-        if show_progress:
-            print(f"[SUM] Pass1: full-text (size={len(full_text)}) …")
-        try:
-            if show_detail:
-                try:
-                    model_used = os.getenv("SUM_MODEL") or (get("pipeline.summarize.model", None) if isinstance(get("pipeline.summarize.model", None), str) else LLM_MODEL)
-                except Exception:
-                    model_used = LLM_MODEL
-                print(f"[SUM]  â€¢ LLM ctx: provider={LLM_PROVIDER} model={model_used} timeout_full={full_timeout} max_tries={max_tries} pass1_chunk={chunk_size}")
-            t0 = time.time()
-            p1 = _llm_pass1_extraction(full_text, timeout=full_timeout, max_tries=max_tries)
-            packs.append(p1)
-            # Optional raw saving
-            if str(os.getenv("SUM_SAVE_RAW", "")).lower() in {"1", "true", "yes", "on"} and file_stem:
-                (SUM_DIR / f"{file_stem}.pass1.json").write_text(json.dumps(p1, ensure_ascii=False, indent=2), encoding="utf-8")
-            attempted_full = True
-            if show_detail:
-                print(f"[SUM]  • full-text took {time.time()-t0:.1f}s")
-        except LLMError as exc:
-            msg = str(exc)
-            if show_progress:
-                print(f"[SUM]  • full-text failed ({msg[:160]}). Falling back to chunking.")
-            # Extra diagnostics in detail mode
-            if show_detail:
-                try:
-                    profile_used = get("pipeline.summarize.llm", None)
-                except Exception:
-                    profile_used = None
-                try:
-                    model_used = os.getenv("SUM_MODEL") or (get("pipeline.summarize.model", None) if isinstance(get("pipeline.summarize.model", None), str) else LLM_MODEL)
-                except Exception:
-                    model_used = LLM_MODEL
-                keys_present = {
-                    "OPENAI_API_KEY": bool(os.getenv("OPENAI_API_KEY")),
-                    "DEEPSEEK_API_KEY": bool(os.getenv("DEEPSEEK_API_KEY")),
-                    "OPENROUTER_API_KEY": bool(os.getenv("OPENROUTER_API_KEY")),
-                }
-                print(f"[SUM]  • LLM error detail: {msg}")
-                print(f"[SUM]  • LLM context: profile={profile_used} provider={LLM_PROVIDER} model={model_used} url={LLM_CHAT_URL} timeout_full={full_timeout} max_tries={max_tries} keys_present={keys_present}")
-            attempted_full = False
+        n_chunks = (len(full_text) + chunk_size - 1) // chunk_size
+        if verbose:
+            print(f"[SUM] Pass1: {n_chunks} chunks (chunk_size={chunk_size}, total={len(full_text)})")
+        for i in range(0, len(full_text), chunk_size):
+            idx = (i // chunk_size) + 1
+            if verbose:
+                print(f"[SUM]  • chunk {idx}/{n_chunks} …")
+            ch = _llm_pass1_extraction(full_text[i : i + chunk_size], timeout=timeout, max_tries=max_tries, model=model, profile=profile)
+            packs.append(ch)
 
-    if not attempted_full:
-        if len(full_text) <= chunk_size:
-            if show_progress:
-                print(f"[SUM] Pass1: 1 chunk (size={len(full_text)})")
-            t0 = time.time()
-            pck = _llm_pass1_extraction(full_text)
-            packs.append(pck)
-            if str(os.getenv("SUM_SAVE_RAW", "")).lower() in {"1", "true", "yes", "on"} and file_stem and not attempted_full:
-                (SUM_DIR / f"{file_stem}.pass1.json").write_text(json.dumps(pck, ensure_ascii=False, indent=2), encoding="utf-8")
-            if show_detail:
-                print(f"[SUM]  • chunk 1 took {time.time()-t0:.1f}s")
-        else:
-            n_chunks = (len(full_text) + chunk_size - 1) // chunk_size
-            if show_progress:
-                print(f"[SUM] Pass1: {n_chunks} chunks (chunk_size={chunk_size}, total={len(full_text)})")
-            idx = 0
-            for i in range(0, len(full_text), chunk_size):
-                idx += 1
-                if show_progress:
-                    start = i
-                    end = min(i + chunk_size, len(full_text))
-                    print(f"[SUM]  • chunk {idx}/{n_chunks} ({start}:{end}) …")
-                t0 = time.time()
-                ch = _llm_pass1_extraction(full_text[i : i + chunk_size], timeout=base_timeout, max_tries=max_tries)
-                packs.append(ch)
-                if str(os.getenv("SUM_SAVE_RAW", "")).lower() in {"1", "true", "yes", "on"} and file_stem:
-                    (SUM_DIR / f"{file_stem}.pass1.{idx}.json").write_text(json.dumps(ch, ensure_ascii=False, indent=2), encoding="utf-8")
-                if show_detail:
-                    print(f"[SUM]    ⤷ chunk {idx} took {time.time()-t0:.1f}s")
     # Merge packs (LLM)
-    if show_progress:
+    if verbose:
         print("[SUM] Merge extraction packs …")
-    t0 = time.time()
-    if show_detail:
-        try:
-            model_used = os.getenv("SUM_MODEL") or (get("pipeline.summarize.model", None) if isinstance(get("pipeline.summarize.model", None), str) else LLM_MODEL)
-        except Exception:
-            model_used = LLM_MODEL
-        print(f"[SUM]  â€¢ packs={len(packs)} provider={LLM_PROVIDER} model={model_used} timeout={base_timeout} max_tries={max_tries}")
-    merged = _llm_merge_packs(packs, timeout=base_timeout, max_tries=max_tries)
-    save_raw = False
-    try:
-        save_raw = bool(get("pipeline.summarize.save_raw", False)) or (str(os.getenv("SUM_SAVE_RAW", "")).lower() in {"1", "true", "yes", "on"})
-    except Exception:
-        save_raw = (str(os.getenv("SUM_SAVE_RAW", "")).lower() in {"1", "true", "yes", "on"})
-    if save_raw and file_stem:
-        (SUM_DIR / f"{file_stem}.merged.json").write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
-    if show_detail:
-        meta = merged.get("meta", {}) if isinstance(merged.get("meta"), dict) else {}
-        meta_present = [k for k in ("title","venue","year","doi","url") if meta.get(k)]
-        print(f"[SUM]  • merge took {time.time()-t0:.1f}s; meta={meta_present} datasets={len(merged.get('datasets',[]) or [])} "
-              f"metrics={len(merged.get('metrics',[]) or [])} results_numbers={len(merged.get('results_numbers',[]) or [])}")
-    # Pass 2: gap fill
-    if show_progress:
-        print("[SUM] Gap‑fill missing fields …")
-    if show_detail:
-        try:
-            model_used = os.getenv("SUM_MODEL") or (get("pipeline.summarize.model", None) if isinstance(get("pipeline.summarize.model", None), str) else LLM_MODEL)
-        except Exception:
-            model_used = LLM_MODEL
-        print(f"[SUM]  â€¢ provider={LLM_PROVIDER} model={model_used} timeout={base_timeout} max_tries={max_tries}")
-    t0 = time.time()
-    merged2 = _llm_pass2_gap_fill(full_text, merged, timeout=base_timeout, max_tries=max_tries)
-    if save_raw and file_stem:
-        (SUM_DIR / f"{file_stem}.gapfill.json").write_text(json.dumps(merged2, ensure_ascii=False, indent=2), encoding="utf-8")
-    if show_detail:
-        # crude diff: count fields newly filled in meta and list counts that increased
-        filled = []
-        for k in ("title","venue","year","doi","url"):
-            if (merged.get("meta",{}).get(k) in (None, "")) and (merged2.get("meta",{}).get(k)):
-                filled.append(k)
-        def _len(x):
-            return len(x or []) if isinstance(x, list) else 0
-        diffs = []
-        for k in ("datasets","metrics","results_numbers","results","ablations","baselines","novelty_claims"):
-            a, b = _len(merged.get(k)), _len(merged2.get(k))
-            if b > a:
-                diffs.append(f"{k}+{b-a}")
-        print(f"[SUM]  • gap‑fill took {time.time()-t0:.1f}s; meta_filled={filled or 'none'}; list_increases={', '.join(diffs) or 'none'}")
+    merged = _llm_merge_packs(packs, timeout=timeout, max_tries=max_tries, model=model, profile=profile)
 
-    # Optional targeted meta/resources fill if still missing
+    # Pass 2: gap fill
+    if verbose:
+        print("[SUM] Gap‑fill missing fields …")
+    merged2 = _llm_pass2_gap_fill(full_text, merged, timeout=timeout, max_tries=max_tries, model=model, profile=profile)
+
+    # Targeted meta/resources fill if still missing
     missing_meta = []
     mp = merged2.get("meta", {}) if isinstance(merged2.get("meta"), dict) else {}
     for k in ("title","venue","year","doi","url"):
         if not _as_str(mp.get(k)):
             missing_meta.append(k)
     res = merged2.get("resources", {}) if isinstance(merged2.get("resources"), dict) else {}
-    rep = merged2.get("reproducibility", {}) if isinstance(merged2.get("reproducibility"), dict) else {}
     if missing_meta or not _as_str(res.get("code_url")) or not _as_str(res.get("data_url")):
-        if show_progress:
+        if verbose:
             print("[SUM] Targeted meta/resources fill …")
         try:
-            m3 = _llm_meta_fill(full_text, merged2)
-            merged2 = m3
-            if save_raw and file_stem:
-                (SUM_DIR / f"{file_stem}.meta_fill.json").write_text(json.dumps(m3, ensure_ascii=False, indent=2), encoding="utf-8")
+            merged2 = _llm_meta_fill(full_text, merged2, model=model, profile=profile)
         except LLMError:
-            if show_detail:
+            if verbose:
                 print("[SUM]  • meta/resources fill skipped due to LLM error.")
+
     # Pass 3: finalize to target schema
-    if show_progress:
+    if verbose:
         print("[SUM] Finalize to target schema …")
-    t0 = time.time()
-    js = _llm_pass3_finalize_schema(merged2)
-    if save_raw and file_stem:
-        (SUM_DIR / f"{file_stem}.final_raw.json").write_text(json.dumps(js, ensure_ascii=False, indent=2), encoding="utf-8")
-    if print_raw:
-        try:
-            print("[SUM RAW] Final LLM JSON (pre-validate):")
-            print(json.dumps(js, ensure_ascii=False, indent=2))
-        except Exception:
-            pass
-    if show_detail:
-        print(f"[SUM]  • finalize took {time.time()-t0:.1f}s")
+    js = _llm_pass3_finalize_schema(merged2, model=model, profile=profile)
 
     # Optional: JSON schema validation/repair (if jsonschema installed)
     def _validate_or_repair(j: Dict[str, Any]) -> Dict[str, Any]:
@@ -646,15 +507,7 @@ def summarize_paper(text: str, title_hint: str = "", file_stem: str | None = Non
             out.append("confusion_matrix")
         return out
 
-    # Toggle via YAML/env if needed
-    try:
-        enforce_required = bool(get("pipeline.summarize.enforce_required", True))
-        if str(os.getenv("SUM_ENFORCE", "")).lower() in {"0", "false", "no", "off"}:
-            enforce_required = False
-        if str(os.getenv("SUM_ENFORCE", "")).lower() in {"1", "true", "yes", "on"}:
-            enforce_required = True
-    except Exception:
-        enforce_required = True
+    enforce_required = True
 
     if enforce_required:
         # training_procedure
@@ -771,7 +624,7 @@ def summarize_paper(text: str, title_hint: str = "", file_stem: str | None = Non
     except Exception:
         out["_completeness"] = 0.0
 
-    if show_detail:
+    if verbose:
         print(
             "[SUM] Final stats: "
             f"title='{out.get('title','')[:60]}', venue='{out.get('venue','')}', year='{out.get('year','')}', doi_present={bool(out.get('doi'))}, "
@@ -780,7 +633,7 @@ def summarize_paper(text: str, title_hint: str = "", file_stem: str | None = Non
     return out
 
 
-def criticize_paper(summary: Dict[str, Any]) -> Dict[str, Any]:
+def criticize_paper(summary: Dict[str, Any], *, timeout: int = 60, max_tries: int = 4, model: Optional[str] = None, profile: Optional[str] = None) -> Dict[str, Any]:
     system = (
         "You are a skeptical reviewer. Given a structured summary, evaluate the strength of novelty, "
         "identify overlaps with common prior work (without external search), highlight potential weaknesses, "
@@ -795,8 +648,14 @@ def criticize_paper(summary: Dict[str, Any]) -> Dict[str, Any]:
             "followup_experiments": ["string"],
         }
     }
-    profile = get("pipeline.summarize.llm", None)
-    js = chat_json(system, json.dumps(user_payload, ensure_ascii=False), temperature=0.0, profile=profile)
+    kwargs: Dict[str, Any] = {}
+    if model is not None:
+        kwargs["model"] = model
+    if profile is not None:
+        kwargs["profile"] = profile
+    kwargs["timeout"] = int(timeout)
+    kwargs["max_tries"] = int(max_tries)
+    js = chat_json(system, json.dumps(user_payload, ensure_ascii=False), temperature=0.0, **kwargs)
     def _as_list(x):
         if isinstance(x, list):
             return [str(i) for i in x]
@@ -810,71 +669,113 @@ def criticize_paper(summary: Dict[str, Any]) -> Dict[str, Any]:
         "followup_experiments": _as_list(js.get("followup_experiments")),
     }
 
+def summarize_pdf(
+    pdf_path: str,
+    *,
+    title_hint: Optional[str] = None,
+    max_pages: int = 0,
+    max_chars: int = 0,
+    chunk_size: int = 20000,
+    timeout: int = 60,
+    max_tries: int = 4,
+    model: Optional[str] = None,
+    profile: Optional[str] = None,
+    verbose: bool = False,
+) -> Dict[str, Any]:
+    """Convenience wrapper: extract text from a PDF and summarize it.
 
-def main() -> None:
-    _ensure_dirs()
-    if not PDF_DIR.exists():
-        print(f"[ERR] PDF dir not found: {PDF_DIR}")
-        return
+    No files are written; returns the structured summary dict.
+    """
+    text = extract_text_from_pdf(pdf_path, max_pages=max_pages, max_chars=max_chars)
+    hint = title_hint if title_hint is not None else os.path.splitext(os.path.basename(str(pdf_path)))[0].replace("_", " ")
+    return summarize_paper(
+        text,
+        title_hint=hint,
+        chunk_size=chunk_size,
+        timeout=timeout,
+        max_tries=max_tries,
+        model=model,
+        profile=profile,
+        verbose=verbose,
+    )
 
-    pdfs = sorted([p for p in PDF_DIR.glob("*.pdf") if p.is_file()])
+
+def process_pdfs(
+    pdf_dir: str | Path,
+    out_dir: str | Path,
+    *,
+    max_pages: int = 0,
+    max_chars: int = 0,
+    chunk_size: int = 20000,
+    timeout: int = 60,
+    max_tries: int = 4,
+    model: Optional[str] = None,
+    profile: Optional[str] = None,
+    verbose: bool = True,
+    skip_existing: bool = True,
+) -> int:
+    """Process all PDFs in pdf_dir and write summary JSONs into out_dir.
+
+    Returns the number of new summaries written.
+    """
+    pdf_dir_p = Path(pdf_dir)
+    out_dir_p = Path(out_dir)
+    out_dir_p.mkdir(parents=True, exist_ok=True)
+    if not pdf_dir_p.exists():
+        if verbose:
+            print(f"[SUM] PDF dir not found: {pdf_dir_p}")
+        return 0
+    pdfs = sorted([p for p in pdf_dir_p.glob("*.pdf") if p.is_file()])
     if not pdfs:
-        print("[INFO] No PDFs found to process.")
-        return
-
-    num_summaries = 0
-
+        if verbose:
+            print("[SUM] No PDFs found to process.")
+        return 0
+    written = 0
     for i, pdf in enumerate(pdfs, start=1):
-        title_hint = pdf.stem.replace("_", " ")
-        out_path = SUM_DIR / f"{pdf.stem}.json"
-        if out_path.exists():
-            print(f"[SKIP] Summary exists: {out_path.name}")
+        out_path = out_dir_p / f"{pdf.stem}.json"
+        if skip_existing and out_path.exists():
+            if verbose:
+                print(f"[SUM] Skip existing: {out_path.name}")
             continue
-
-        print(f"[PDF {i}/{len(pdfs)}] Extracting: {pdf.name}")
+        if verbose:
+            print(f"[SUM] ({i}/{len(pdfs)}) Extracting: {pdf.name}")
         try:
-            # YAML overrides take precedence; env can override YAML
-            cfg_max_pages = get("pipeline.summarize.max_pages", None)
-            cfg_max_chars = get("pipeline.summarize.max_chars", None)
-            # Default to 0 (no limit) unless explicitly configured
-            default_pages = "0" if cfg_max_pages is None else str(cfg_max_pages)
-            default_chars = "0" if cfg_max_chars is None else str(cfg_max_chars)
-            max_pages = int(os.getenv("SUM_MAX_PAGES", default_pages) or default_pages)
-            max_chars = int(os.getenv("SUM_MAX_CHARS", default_chars) or default_chars)
-            text = extract_text_from_pdf(pdf, max_pages=max_pages, max_chars=max_chars)
+            text = extract_text_from_pdf(str(pdf), max_pages=max_pages, max_chars=max_chars)
         except Exception as exc:
-            print(f"[SKIP] Failed to extract text: {pdf.name} :: {exc}")
+            if verbose:
+                print(f"[SUM]  • extract failed: {pdf.name} :: {exc}")
             continue
-
         try:
-            summ = summarize_paper(text, title_hint=title_hint, file_stem=pdf.stem)
+            summ = summarize_paper(
+                text,
+                title_hint=pdf.stem.replace("_", " "),
+                chunk_size=chunk_size,
+                timeout=timeout,
+                max_tries=max_tries,
+                model=model,
+                profile=profile,
+                verbose=verbose,
+            )
         except LLMError as exc:
-            print(f"[SKIP] LLM summarize failed: {pdf.name} :: {exc}")
+            if verbose:
+                print(f"[SUM]  • summarize failed: {pdf.name} :: {exc}")
             continue
-
         try:
-            crit = criticize_paper(summ)
+            crit = criticize_paper(summ, timeout=timeout, max_tries=max_tries, model=model, profile=profile)
         except LLMError as exc:
-            print(f"[WARN] LLM critic failed: {pdf.name} :: {exc}")
-            crit = {
-                "novelty_strength": "",
-                "possible_prior_overlap": [],
-                "weaknesses": [],
-                "followup_experiments": [],
-            }
-
-        # PDF hash for caching/regression
+            if verbose:
+                print(f"[SUM]  • critic failed: {pdf.name} :: {exc}")
+            crit = {"novelty_strength": "", "possible_prior_overlap": [], "weaknesses": [], "followup_experiments": []}
         record = {"summary": summ, "critic": crit}
-        with open(out_path, "w", encoding="utf-8") as f:
-            json.dump(record, f, ensure_ascii=False, indent=2)
-        print(f"[OK] Wrote {out_path}")
-        num_summaries += 1
-
-    if num_summaries == 0:
-        print("[INFO] No new summaries produced.")
-    else:
-        print(f"[DONE] Wrote {num_summaries} summaries to {SUM_DIR}")
-
-
-if __name__ == "__main__":
-    main()
+        try:
+            out_path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+            if verbose:
+                print(f"[SUM]  • wrote {out_path}")
+            written += 1
+        except Exception as exc:
+            if verbose:
+                print(f"[SUM]  • write failed: {out_path.name} :: {exc}")
+            continue
+    if verbose:
+        print(f"[SUM] Done. New summaries: {written}")
+    return written

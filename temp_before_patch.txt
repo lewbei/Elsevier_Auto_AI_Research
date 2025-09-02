@@ -1,0 +1,19 @@
+    try:
+        yaml_force = get("pipeline.summarize.force_chunk", False)
+        force_chunk = (str(os.getenv("SUM_FORCE_CHUNK", "")).lower() in {"1", "true", "yes", "on"}) or bool(yaml_force)
+    except Exception:
+        force_chunk = False
+    attempted_full = False
+    if not force_chunk:
+        if show_progress:
+            print(f"[SUM] Pass1: full-text (size={len(full_text)}) …")
+        try:
+            t0 = time.time()
+            p1 = _llm_pass1_extraction(full_text, timeout=full_timeout, max_tries=max_tries)
+            packs.append(p1)
+            # Optional raw saving
+            if str(os.getenv("SUM_SAVE_RAW", "")).lower() in {"1", "true", "yes", "on"} and file_stem:
+                (SUM_DIR / f"{file_stem}.pass1.json").write_text(json.dumps(p1, ensure_ascii=False, indent=2), encoding="utf-8")
+            attempted_full = True
+            if show_detail:
+                print(f"[SUM]  • full-text took {time.time()-t0:.1f}s")

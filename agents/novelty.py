@@ -1,7 +1,7 @@
 import os
 import json
 import pathlib
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Tuple
 from dotenv import load_dotenv
 
 from utils.llm_utils import chat_json, LLMError, LLM_PROVIDER, LLM_MODEL
@@ -180,6 +180,7 @@ def group_novelty_and_ideas_v2(
         "- Every idea MUST include: derived_from_titles (>=2), delta_vs_prior (<=240 chars citing those titles), AND >=3 numeric spec tokens (e.g., img_size=640, lr=3e-4, iou_thresh=0.6).\n"
         "- Avoid generic augmentation-only or hparam-only tweaks unless justified as non-trivial.\n"
         "- If detection/YOLO, include yolo_version, backbone, img_size, anchors, conf_thresh, iou_thresh, nms, task_adapt in method/spec_hint.\n"
+        "- Tag each idea with domain_tags (e.g., ['derm','lung','retina'] or ['generic']) and task_tags (e.g., ['segmentation','classification','detection']).\n"
         "Tasks: (a) robustly CLUSTER into 3–6 THEMES; (b) write a compact SUMMARY per theme with divergences/caveats and 2–4 representative paper titles; (c) propose 5–8 NEW RESEARCH IDEAS.\n"
         "Return strictly JSON and self-validate against the output_schema."
     )
@@ -188,7 +189,7 @@ def group_novelty_and_ideas_v2(
         "papers": items,
         "persona_notes": list(persona_notes or []),
         "facets": json.loads(facet_block),
-        "output_schema": {
+    "output_schema": {
             "themes": [{"name": "string", "summary": "string", "representative_papers": ["string"]}],
             "new_ideas": ["string"],
             "new_ideas_detailed": [
@@ -204,6 +205,8 @@ def group_novelty_and_ideas_v2(
                     "compute_budget": "string",
                     "derived_from_titles": ["string"],
                     "delta_vs_prior": "string",
+            "domain_tags": ["string"],
+            "task_tags": ["string"],
                 }
             ],
         },
@@ -265,6 +268,8 @@ def group_novelty_and_ideas_v2(
             "compute_budget": str(item.get("compute_budget") or "").strip(),
             "derived_from_titles": [str(x).strip() for x in (item.get("derived_from_titles") or []) if str(x).strip()],
             "delta_vs_prior": str(item.get("delta_vs_prior") or "").strip(),
+            "domain_tags": [str(x).strip().lower() for x in (item.get("domain_tags") or []) if str(x).strip()],
+            "task_tags": [str(x).strip().lower() for x in (item.get("task_tags") or []) if str(x).strip()],
         }
         key = (dft["title"].lower(), dft["delta_vs_prior"].lower())
         if key in seen:
@@ -274,6 +279,69 @@ def group_novelty_and_ideas_v2(
 
     themes = [t for t in themes_agg if isinstance(t, dict)]
     new_ideas = [it.get("title", "") for it in fixed_di]
+    # Local duplicate similarity against available novelty/methods text (no external models)
+    try:
+        import difflib
+        corpus: List[str] = []
+        for s in summaries:
+            try:
+                cl = " ".join([" ".join(s.get("novelty_claims") or []), " ".join(s.get("methods") or [])])
+                cl = cl.strip()
+                if cl:
+                    corpus.append(cl)
+            except Exception:
+                continue
+        def _max_dup_sim(text: str) -> float:
+            best = 0.0
+            for c in corpus:
+                try:
+                    r = difflib.SequenceMatcher(None, text.lower(), c.lower()).ratio()
+                except Exception:
+                    r = 0.0
+                if r > best:
+                    best = r
+            return best
+        # Tier‑1 scorecard inspired scoring
+        def _tier1_score(it: Dict[str, Any]) -> Tuple[float, Dict[str, float]]:
+            w = {"delta": 0.25, "ablation": 0.25, "compute": 0.20, "general": 0.15, "rigor": 0.15}
+            s = {k: 0.0 for k in w}
+            delta = it.get("delta_vs_prior", "").strip()
+            s["delta"] = 1.0 if len(delta) >= 12 else (0.4 if delta else 0.0)
+            eval_plan = " ".join(it.get("eval_plan", []))
+            abl_terms = ["ablation", "sweep", "off", "tau", "sigma", "dropout", "without"]
+            ablation_hits = sum(term in eval_plan.lower() for term in abl_terms)
+            s["ablation"] = min(1.0, 0.5 + 0.25 * ablation_hits) if ablation_hits else 0.0
+            budget = (it.get("compute_budget", "") + " " + it.get("spec_hint", "")).lower()
+            s["compute"] = 1.0 if any(x in budget for x in ["<=100", "100 steps", "1 epoch", "single gpu"]) else (0.5 if "gpu" in budget else 0.0)
+            spec_txt = (it.get("spec_hint", "") + " " + it.get("method", "")).lower()
+            domain_words = ["isic", "derm", "skin", "retina", "lidc", "lung", "chestxray", "nih-chest"]
+            s["general"] = 1.0 if not any(dw in spec_txt for dw in domain_words) else 0.4
+            rigor = " ".join(it.get("eval_plan", [])).lower()
+            s["rigor"] = 1.0 if any(m in rigor for m in ["iou", "dice", "map", "auc", "ece", "precision"]) else 0.5
+            total = sum(w[k] * s[k] for k in w)
+            return total, s
+        for it in fixed_di:
+            try:
+                idea_txt = " ".join([
+                    it.get("title", ""),
+                    it.get("why_novel", ""),
+                    it.get("spec_hint", ""),
+                    it.get("method", ""),
+                ]).strip()
+                it["dup_sim"] = round(_max_dup_sim(idea_txt), 3) if idea_txt else 0.0
+            except Exception:
+                it["dup_sim"] = 0.0
+            score, _ = _tier1_score(it)
+            # Small penalty for high duplication similarity
+            if it.get("dup_sim", 0.0) >= 0.7:
+                score *= 0.75
+            elif it.get("dup_sim", 0.0) >= 0.6:
+                score *= 0.9
+            it["tier1_score"] = round(float(score), 3)
+        # Sort by tier1_score descending for downstream selection
+        fixed_di.sort(key=lambda d: d.get("tier1_score", 0.0), reverse=True)
+    except Exception:
+        pass
     return {"themes": themes, "new_ideas": new_ideas, "new_ideas_detailed": fixed_di}
 
 

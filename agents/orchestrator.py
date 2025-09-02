@@ -86,12 +86,44 @@ def main() -> None:
         print("[ORCH] Skipping paper_finder per config/env")
 
     # Phase: summaries (per-paper)
-    if not (get_bool("pipeline.skip.summaries", False) or (str(os.getenv("SKIP_SUMMARIES", "")).lower() in {"1", "true", "yes"})):
+    if not (get_bool("pipeline.skip.summaries", False) or (str(os.getenv("SKIP_SUMMARIES", "").lower() in {"1", "true", "yes"}))):
         notes = _persona_phase_notes("summaries", {}, steps)
         if notes:
             log("summaries_notes", notes)
             _write_text(notes_dir / "summaries.txt", "\n\n".join(notes))
-        _run_mod("agents.summarize")
+        # Programmatic call (no CLI), using stage config from YAML
+        try:
+            from agents.summarize import process_pdfs
+            pdf_dir = HERE / "pdfs"
+            sum_dir = HERE / "data" / "summaries"
+            # Prefer full-text mode for GPT-5 mini
+            profile = (get("pipeline.summarize.llm", None) or None)
+            model = (get("pipeline.summarize.model", None) or None)
+            default_model = (get("llm.default", None) or None)
+            prof = str(profile or "").strip().lower()
+            md = str(model or "").strip().lower()
+            dm = str(default_model or "").strip().lower()
+            chunk_size = int(get("pipeline.summarize.pass1_chunk", 20000) or 20000)
+            if (md.startswith("gpt-5-")) or (not md and prof == "default" and dm.startswith("gpt-5-")):
+                chunk_size = -1
+
+            skip_existing_cfg = get("pipeline.summarize.skip_existing", None)
+            skip_existing = True if skip_existing_cfg is None else bool(skip_existing_cfg)
+            process_pdfs(
+                pdf_dir=str(pdf_dir),
+                out_dir=str(sum_dir),
+                max_pages=int(get("pipeline.summarize.max_pages", 0) or 0),
+                max_chars=int(get("pipeline.summarize.max_chars", 0) or 0),
+                chunk_size=chunk_size,
+                timeout=int(get("pipeline.summarize.timeout", 60) or 60),
+                max_tries=int(get("pipeline.summarize.max_tries", 4) or 4),
+                model=model,
+                profile=profile,
+                verbose=bool(get("pipeline.summarize.progress", True) or get("pipeline.summarize.detail", False)),
+                skip_existing=skip_existing,
+            )
+        except Exception as exc:
+            print(f"[ORCH] Summaries failed: {exc}")
     else:
         print("[ORCH] Skipping summaries per config/env")
 

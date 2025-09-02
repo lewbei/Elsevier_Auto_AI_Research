@@ -61,3 +61,65 @@ Runbook (Windows CMD from Git‑Bash)
 
 - Compile: `cmd.exe /C "python dev\compile_all.py"`
 - Tests: `cmd.exe /C "python -m pytest -q"`
+
+---
+
+# Autonomous Experimentation + Domain Templates + Novelty Check
+
+Checklist (what I will do)
+
+- Add domain templates and auto-select per goal/dataset
+- Enable LLM-driven code edits to influence specs dynamically
+- Add external novelty check (Semantic Scholar) with offline fallback
+- Close the loop: analyze results → LLM suggests next changes
+- Keep everything Windows + git-bash friendly and stub-safe
+
+Reasoning Protocol
+
+- Plan: Introduce minimal modules that hook into existing iterate/novelty paths without breaking current behavior. Use feature flags via YAML/env. Keep offline fallbacks.
+- Steps: Templates • Iterate integration • External novelty check • Novelty wiring • Iterate update_spec hook • Compile/tests.
+- Risks: Missing API keys, flaky network, no torchvision on Windows, brittle LLM outputs.
+- Rollback: Disable via flags (CODEGEN_ENABLE=0, NOVELTY_EXT_CHECK=0), fall back to deterministic transforms, skip template detection.
+
+Implementation Notes
+
+- lab/domain_templates.py: detect_domain(goal, dataset) → {'cv'|'nlp'|'rl'|'generic'} + template hints. Exposed helpers for iterate prompts/spec defaults.
+- lab/novelty_check.py: query Semantic Scholar (Graph API) for each idea title/keywords; annotate with hits and a novelty score; write data/novelty_search.jsonl; offline fallback.
+- agents/novelty.py: optional external novelty filter controlled by config novelty.external_check.enable or env NOVELTY_EXT_CHECK=1. Blends ext novelty into tier1_score; filters low-novelty ideas.
+- agents/iterate.py:
+  - Include domain/template hints when proposing baseline/novelty/ablation.
+  - Before running, call lab.generated_train.update_spec(spec) if present so LLM-written code can steer runs.
+  - Journal each iteration under experiments/journal.jsonl with compact context + decisions.
+
+Windows Runbook
+
+- Python: use cmd.exe /C python ... from git-bash; no python3.
+- Flags: CODEGEN_ENABLE=1 (LLM aug), CODEGEN_EDITOR=1 (training hooks), NOVELTY_EXT_CHECK=1 (external check).
+
+Validation
+
+- Compile all Python files to bytecode.
+- Run pytest -q. Adjust only code touched if tests expose issues.
+
+---
+
+# Summaries: Related Work + Citations
+
+Checklist (what I will do)
+
+- Extend summarize schema to include related_work[].
+- Capture citation strings (title/venue/year/doi/url) per item.
+- Normalize and write related_work to each summary JSON.
+- Compile sources and run pytest to validate.
+
+Reasoning Protocol
+
+- Plan: Teach the summarizer prompts (pass1/fill/finalize) to extract a concise related_work list from the paper text (usually the References section), keeping short citation strings and optional DOI/URL. Coerce to a stable object list in the final JSON to reduce novelty conflicts downstream.
+- Steps: Update prompts/schemas • Normalize output • Compile • Pytest.
+- Risks: PDFs missing explicit references; noisy extraction; longer payload size.
+- Rollback: Remove field or cap size via YAML/env; ignore during novelty if noisy.
+
+Runbook (Windows CMD from Git‑Bash)
+
+- Compile: cmd.exe /C "python dev\compile_all.py"
+- Tests:  cmd.exe /C "python -m pytest -q"

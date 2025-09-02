@@ -474,8 +474,8 @@ def _extract_outline(novelty: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _pick_candidates(novelty: Dict[str, Any], k: int = 3) -> list[Dict[str, Any]]:
-    """Pick top-k novelty idea candidates with dedupe and normalized shape."""
-    cands: list[Dict[str, Any]] = []
+    """Pick top-k novelty idea candidates with dedupe and normalized shape, preferring higher tier1_score when present."""
+    bucket: list[Dict[str, Any]] = []
     seen = set()
 
     def _push(d: Dict[str, Any]) -> None:
@@ -486,8 +486,8 @@ def _pick_candidates(novelty: Dict[str, Any], k: int = 3) -> list[Dict[str, Any]
         if key in seen:
             return
         seen.add(key)
-        cands.append({
-            "id": str(d.get("id") or len(cands) + 1),
+        bucket.append({
+            "id": str(d.get("id") or len(bucket) + 1),
             "title": title,
             "novelty_kind": str(d.get("novelty_kind") or "").strip(),
             "spec_hint": str(d.get("spec_hint") or "").strip(),
@@ -497,6 +497,9 @@ def _pick_candidates(novelty: Dict[str, Any], k: int = 3) -> list[Dict[str, Any]
             "compute_budget": str(d.get("compute_budget") or "").strip(),
             "derived_from_titles": [str(x).strip() for x in (d.get("derived_from_titles") or []) if str(x).strip()],
             "delta_vs_prior": str(d.get("delta_vs_prior") or "").strip(),
+            "domain_tags": [str(x).strip().lower() for x in (d.get("domain_tags") or []) if str(x).strip()],
+            "task_tags": [str(x).strip().lower() for x in (d.get("task_tags") or []) if str(x).strip()],
+            "tier1_score": float(d.get("tier1_score", 0.0) or 0.0),
         })
 
     # Prefer structured ideas first
@@ -506,20 +509,37 @@ def _pick_candidates(novelty: Dict[str, Any], k: int = 3) -> list[Dict[str, Any]
             for it in xs:
                 if isinstance(it, dict):
                     _push(it)
-        if cands:
+        if bucket:
             break
 
     # Fallback to strings if no structured ideas present
-    if not cands:
+    if not bucket:
         for key in ("unique_ideas", "new_ideas"):
             xs = novelty.get(key) or []
             if isinstance(xs, list):
                 for s in xs:
                     _push({"title": str(s)})
-            if cands:
+            if bucket:
                 break
-
-    return cands[: max(0, int(k))]
+    # Prefer by tier1_score desc, then by title
+    bucket.sort(key=lambda d: (d.get("tier1_score", 0.0), d.get("title", "")), reverse=True)
+    topk = max(0, int(k))
+    cands = bucket[: topk]
+    # Coverage: ensure at least one domain-agnostic (generic) or multi-domain candidate if available
+    try:
+        def _is_generic_or_multi(c: Dict[str, Any]) -> bool:
+            tags = c.get("domain_tags", []) or []
+            if any(t == "generic" for t in tags):
+                return True
+            return len(set([t for t in tags if t])) >= 2
+        if cands and not any(_is_generic_or_multi(c) for c in cands):
+            for extra in bucket[topk:]:
+                if _is_generic_or_multi(extra):
+                    cands[-1] = extra
+                    break
+    except Exception:
+        pass
+    return cands
 
 
 def build_plan(novelty: Dict[str, Any]) -> Dict[str, Any]:
@@ -534,7 +554,7 @@ def build_plan(novelty: Dict[str, Any]) -> Dict[str, Any]:
         f"Target: iterative experiment loop for {topic}.\n"
         "Requirements: return STRICT JSON with the schema below; keep runnable on CPU or single GPU with <=1 epoch per run and small step budgets.\n"
         "Grounding: use the provided novelty_outline (problems/objectives/contributions/research_questions) and choose ONE novelty_focus from novelty_candidates.\n"
-        "Map the chosen candidate's eval_plan/spec_hint into concrete tasks/steps suitable for our environment.\n"
+        "Map the chosen candidate's eval_plan/spec_hint into concrete tasks/steps suitable for our environment. Use delta_vs_prior to set baselines and at least one ablation.\n"
         "Include ALL of the following keys, each NON-EMPTY: objective, hypotheses, success_criteria (metric + delta vs baseline), datasets (name + path), baselines, novelty_focus, stopping_rules, tasks (name/why/steps), risks (risk/mitigation), assumptions, milestones.\n"
         "STRICT success_criteria SHAPE: an ARRAY of OBJECTS, each {metric: string, delta_vs_baseline: number}.\n"
         "Do NOT return 'primary_metric'/'secondary_metrics' objects; do NOT return strings like '+0.03 absolute' — use 0.03 for +3%.\n"
@@ -549,6 +569,9 @@ def build_plan(novelty: Dict[str, Any]) -> Dict[str, Any]:
         "constraints": {
             "budget": "<= 1 epoch per run, <= 100 steps",
             "dataset_default": f"{dataset_name('ISIC').upper()} under {dataset_path_for()} with train/ and val/",
+            "domain": "generic",
+            "task_tags": [],
+            "allowed_datasets": [dataset_name('ISIC')],
         },
         "output_schema": {
             "objective": "string",
@@ -642,7 +665,11 @@ def build_plan(novelty: Dict[str, Any]) -> Dict[str, Any]:
     try:
         if candidates:
             c0 = candidates[0]
-            parts = [str(c0.get("novelty_kind") or "").strip(), str(c0.get("spec_hint") or "").strip()]
+            parts = [
+                str(c0.get("novelty_kind") or "").strip(),
+                str(c0.get("spec_hint") or "").strip(),
+                str(c0.get("delta_vs_prior") or "").strip(),
+            ]
             parts = [p for p in parts if p]
             suggested_focus = ": ".join(parts) if parts else str(c0.get("title") or "").strip()
     except Exception:
@@ -670,55 +697,12 @@ def build_plan(novelty: Dict[str, Any]) -> Dict[str, Any]:
     return plan
 
 
-def make_plan_offline(novelty: Dict[str, Any]) -> Dict[str, Any]:
-    """Offline fallback that derives a compact plan without LLM access."""
-    themes = novelty.get("themes") or []
-    outline = _extract_outline(novelty)
-    candidates = _pick_candidates(novelty, k=1)
-    objective = "Evaluate a simple novelty"
-    novelty_focus = "augmentation and/or classifier head"
-    tasks = []
-    # Prefer first structured candidate to seed focus and tasks
-    if candidates:
-        c0 = candidates[0]
-        nk = c0.get("novelty_kind") or ""
-        sh = c0.get("spec_hint") or ""
-        ttl = c0.get("title") or ""
-        novelty_focus = (f"{nk}: {sh}" if nk and sh else (ttl or nk or sh or novelty_focus))
-        ev = c0.get("eval_plan") or []
-        if isinstance(ev, list) and ev:
-            tasks = [{"name": f"Eval step {i}", "why": "from novelty eval_plan", "steps": [str(s)]} for i, s in enumerate(ev, start=1)]
-    # Lightly use themes if no candidate
-    if not candidates and themes and isinstance(themes, list):
-        try:
-            first = themes[0]
-            if isinstance(first, dict) and first.get("name"):
-                novelty_focus = str(first.get("name"))
-        except Exception:
-            pass
-    # Hypotheses seeded from research_questions/objectives when available
-    hyps = outline.get("research_questions") or outline.get("objectives") or [
-        "A small augmentation or head change improves val acc by ~0.5pp"
-    ]
-    plan = {
-        "objective": objective,
-        "hypotheses": hyps[:3],
-        "success_criteria": [{"metric": "val_accuracy", "delta_vs_baseline": 0.005}],
-        "datasets": [{"name": dataset_name("DATA").upper(), "path": dataset_path_for()}],
-        "baselines": ["resnet18 minimal"],
-        "novelty_focus": novelty_focus,
-        "stopping_rules": ["stop if novelty beats baseline by >=0.5pp"],
-        "tasks": tasks,
-        "assumptions": [],
-        "milestones": [],
-        "risks": [],
-    }
-    return _normalize_plan_shape(plan)
+ 
 
 
 def run_planning_session(novelty: Dict[str, Any]) -> Dict[str, Any]:
     """Run a small multi-agent planning session and return the final plan.
-    Logs conversation turns into data/plan_session.jsonl. Falls back offline on error.
+    Logs conversation turns into data/plan_session.jsonl. No offline fallback; fails loudly on error.
     """
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     session_log = DATA_DIR / "plan_session.jsonl"
@@ -769,6 +753,28 @@ def run_planning_session(novelty: Dict[str, Any]) -> Dict[str, Any]:
         # Prepare outline/candidates for all roles
         outline = _extract_outline(novelty)
         candidates = _pick_candidates(novelty, k=3)
+        # Lightweight constraints block with domain/task hints and dataset defaults
+        try:
+            dom_tags = []
+            task_tags = []
+            for c in candidates:
+                dom_tags.extend([t for t in c.get("domain_tags", []) if t])
+                task_tags.extend([t for t in c.get("task_tags", []) if t])
+            dom = "generic"
+            if "generic" in dom_tags:
+                dom = "generic"
+            elif dom_tags:
+                dom = str(dom_tags[0])
+        except Exception:
+            dom = "generic"
+            task_tags = []
+        constraints = {
+            "budget": "<= 1 epoch per run, <= 100 steps",
+            "dataset_default": f"{dataset_name('ISIC').upper()} under {dataset_path_for()} with train/ and val/",
+            "domain": dom,
+            "task_tags": list({t for t in task_tags if t}),
+            "allowed_datasets": [dataset_name('ISIC')],
+        }
         # Planner request tuning (timeouts/retries)
         try:
             _req_timeout = int(get("pipeline.planner.request_timeout", 180) or 180)
@@ -792,7 +798,7 @@ def run_planning_session(novelty: Dict[str, Any]) -> Dict[str, Any]:
         pi_system = load_prompt("planner_pi_system") or (
             "You are the PI (Principal Investigator). Draft a clear, minimal, and resource-aware plan grounded in the novelty report.\n"
             "Use novelty_outline (problems/objectives/contributions/research_questions) and choose ONE novelty from novelty_candidates as the novelty_focus.\n"
-            "Translate the chosen candidate's eval_plan/spec_hint into concrete tasks/steps that fit <=1 epoch and <=100 steps.\n"
+            "Translate the chosen candidate's eval_plan/spec_hint into concrete tasks/steps that fit <=1 epoch and <=100 steps. Use delta_vs_prior to define baselines and at least one falsifying ablation.\n"
             "Output MUST include ALL keys, each non-empty: objective, hypotheses, success_criteria (metric + delta vs baseline), datasets (name + path), baselines, novelty_focus, stopping_rules, tasks (name/why/steps), risks (risk/mitigation), assumptions, milestones.\n"
             "STRICT success_criteria SHAPE: an ARRAY of OBJECTS, each {metric: string, delta_vs_baseline: number}. No 'primary_metric'/'secondary_metrics' maps. No string deltas.\n"
             "Metrics may include mAP@0.5, FP_per_image, precision@IoU0.5, IoU, Dice, AUC, ECE, or val_accuracy — pick those matching the novelty.\n"
@@ -803,6 +809,7 @@ def run_planning_session(novelty: Dict[str, Any]) -> Dict[str, Any]:
             "novelty_report": novelty,
             "novelty_outline": outline,
             "novelty_candidates": candidates,
+            "constraints": constraints,
             "persona_notes": persona_notes,
         }, ensure_ascii=False)
         append_jsonl(session_log, {"role": "PI_input", "system": pi_system, "user": json.loads(pi_user)})
@@ -855,7 +862,7 @@ def run_planning_session(novelty: Dict[str, Any]) -> Dict[str, Any]:
         eng_system = load_prompt("planner_engineer_system") or (
             "You are the Engineer. Refine the PI plan into runnable specifications with exact parameters and safe ranges.\n"
             "Validate dataset paths, choose realistic metrics, ensure baselines are minimal, and convert the selected novelty candidate into short step-by-step tasks.\n"
-            "Respect constraints (<=1 epoch, small steps). Return JSON with ALL keys present and non-empty: objective, hypotheses, success_criteria, datasets, baselines, novelty_focus, stopping_rules, tasks, risks, assumptions, milestones.\n"
+            "Respect constraints (<=1 epoch, small steps). Use delta_vs_prior to propose explicit ablations that isolate the change. Return JSON with ALL keys present and non-empty: objective, hypotheses, success_criteria, datasets, baselines, novelty_focus, stopping_rules, tasks, risks, assumptions, milestones.\n"
             "STRICT success_criteria SHAPE: an ARRAY of OBJECTS, each {metric: string, delta_vs_baseline: number}. No 'primary_metric'/'secondary_metrics'. Use 0.03 for +3%.\n"
             "Self-check: validate keys/types/constraints; return only JSON."
         )
@@ -863,6 +870,7 @@ def run_planning_session(novelty: Dict[str, Any]) -> Dict[str, Any]:
             "pi_plan": pi,
             "novelty_outline": outline,
             "novelty_candidates": candidates,
+            "constraints": constraints,
             "persona_notes": persona_notes,
         }, ensure_ascii=False)
         append_jsonl(session_log, {"role": "Engineer_input", "system": eng_system, "user": json.loads(eng_user)})
@@ -907,7 +915,7 @@ def run_planning_session(novelty: Dict[str, Any]) -> Dict[str, Any]:
         rev_system = load_prompt("planner_reviewer_system") or (
             "You are the Reviewer. Check for clarity, feasibility, minimalism, and internal consistency.\n"
             "Ensure the novelty_focus corresponds to one candidate and tasks map to its eval_plan/spec_hint.\n"
-            "Finalize a lean plan that fits the compute budget; keep thresholds and dataset paths explicit.\n"
+            "Finalize a lean plan that fits the compute budget; keep thresholds and dataset paths explicit. Ensure at least one ablation based on delta_vs_prior is present.\n"
             "Return final plan JSON with ALL keys present and non-empty: objective, hypotheses, success_criteria, datasets, baselines, novelty_focus, stopping_rules, tasks, risks, assumptions, milestones.\n"
             "STRICT success_criteria SHAPE: an ARRAY of OBJECTS, each {metric: string, delta_vs_baseline: number}. No 'primary_metric'/'secondary_metrics'. Numeric deltas only.\n"
             "Self-check: validate keys/types/constraints; return only JSON."
@@ -916,6 +924,7 @@ def run_planning_session(novelty: Dict[str, Any]) -> Dict[str, Any]:
             "engineer_plan": eng,
             "novelty_outline": outline,
             "novelty_candidates": candidates,
+            "constraints": constraints,
             "persona_notes": persona_notes,
         }, ensure_ascii=False)
         append_jsonl(session_log, {"role": "Reviewer_input", "system": rev_system, "user": json.loads(rev_user)})
@@ -952,11 +961,14 @@ def run_planning_session(novelty: Dict[str, Any]) -> Dict[str, Any]:
                 print(f"[WARN] {tag} produced invalid plan shape: {e}")
 
         _warn_if_invalid("PI", pi)
-        _print_schema_errors("PI", pi, PLAN_SCHEMA)
+        if is_verbose():
+            _print_schema_errors("PI", pi, PLAN_SCHEMA)
         _warn_if_invalid("Engineer", eng)
-        _print_schema_errors("Engineer", eng, PLAN_SCHEMA)
+        if is_verbose():
+            _print_schema_errors("Engineer", eng, PLAN_SCHEMA)
         _warn_if_invalid("Reviewer", rev)
-        _print_schema_errors("Reviewer", rev, PLAN_SCHEMA)
+        if is_verbose():
+            _print_schema_errors("Reviewer", rev, PLAN_SCHEMA)
         append_jsonl(session_log, {"role": "Reviewer", "content": rev})
         if _progress:
             try:
@@ -1032,6 +1044,11 @@ def run_planning_session(novelty: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def main() -> None:
+    # Ensure environment variables are available
+    try:
+        load_dotenv()
+    except Exception:
+        pass
     _ensure_dirs()
     if not REPORT_PATH.exists():
         print(f"[ERR] Missing novelty report at {REPORT_PATH}. Run agents.novelty first.")

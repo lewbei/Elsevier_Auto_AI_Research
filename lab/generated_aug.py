@@ -8,12 +8,8 @@ class GeneratedAug:
         if T is None:
             self.pipe = None
         else:
-            # Keep the list short and deterministic where possible.
-            # Resize to the input size referenced in the spec, apply a small fixed blur,
-            # then convert to tensor.
             self.pipe = T.Compose([
                 T.Resize((224, 224)),
-                T.GaussianBlur(kernel_size=3, sigma=0.1),
                 T.ToTensor(),
             ])
 

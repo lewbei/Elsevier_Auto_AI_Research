@@ -66,11 +66,15 @@ def score_and_filter_ideas(
     if not SCORES_PATH.exists():
         SCORES_PATH.write_text("", encoding="utf-8")
     for it in ideas:
+        # Prefer precomputed tier‑1 score if present
+        t1 = float(it.get("tier1_score", 0.0) or 0.0)
         spec = specificity_score(it)
         grnd = grounding_score(it, facets)
         pen = penalty(it, facets)
-        total = 2 * spec + 3 * grnd - pen
-        ranked.append((total, spec, grnd, pen, it))
+        base_total = 2 * spec + 3 * grnd - pen
+        # Blend scores: 70% tier‑1 (0..1 scaled to 0..10), 30% base_total
+        blended = 0.7 * (t1 * 10.0) + 0.3 * float(base_total)
+        ranked.append((blended, spec, grnd, pen, t1, it))
         with open(SCORES_PATH, "a", encoding="utf-8") as f:
             f.write(
                 json.dumps(
@@ -79,7 +83,8 @@ def score_and_filter_ideas(
                         "spec": spec,
                         "grounding": grnd,
                         "penalty": pen,
-                        "total": total,
+                        "tier1": t1,
+                        "total": blended,
                     },
                     ensure_ascii=False,
                 )
