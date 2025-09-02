@@ -56,13 +56,17 @@ pipeline:
     novelty: true
     idea_blueprints: false
     planner: true
-    iterate: false
+    iterate: true
     lit_review: true
     interactive: false
   # Number of iterate cycles (fallback to 2 if unset)
   max_iters: 2
   # Write paper draft at the end
-  write_paper: false
+  write_paper: true
+  # Paper drafting options (LLM-enabled drafting)
+  write_paper_llm:
+    enable: true   # enable LLM-based paper drafting
+    # model: ""    # optional explicit model; empty uses llm.default
   # Re-run stages even if artifacts already exist
   always_fresh: true
   # Summarize agent configuration

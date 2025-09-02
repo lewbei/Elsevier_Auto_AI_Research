@@ -6,6 +6,7 @@ and a brief reflection pass for clarity/consistency.
 """
 
 import json
+import os
 import pathlib
 import shutil
 import subprocess
@@ -52,7 +53,15 @@ def _best_acc(runs: List[Dict[str, Any]], name_contains: str, prefer_metric: str
 
 
 def _render_md(title: str, novelty: Dict[str, Any], plan: Dict[str, Any], summary: Dict[str, Any]) -> str:
-    runs = summary.get("runs", []) if isinstance(summary.get("runs"), list) else []
+    # Guard against non-dict inputs; callers may pass loose JSON content
+    if not isinstance(novelty, dict):
+        novelty = {}
+    if not isinstance(plan, dict):
+        plan = {}
+    if not isinstance(summary, dict):
+        summary = {}
+    runs_val = summary.get("runs") if isinstance(summary, dict) else None
+    runs = runs_val if isinstance(runs_val, list) else []
     baseline_acc = _best_acc(runs, "baseline")
     novelty_acc = _best_acc(runs, "novelty")
     ablation_acc = _best_acc(runs, "ablation")
@@ -73,24 +82,79 @@ def _render_md(title: str, novelty: Dict[str, Any], plan: Dict[str, Any], summar
     )
     lines.append("")
 
-    lines.append("## Introduction and Related Work")
+    # Structured Introduction
+    lines.append("## Introduction")
+    lines.append("### Executive Introduction (E-Intro)")
+    goal_txt = str(get("project.goal", "") or "This work explores a compact, reproducible pipeline for skin-cancer classification under tight compute constraints.")
+    lines.append(goal_txt)
+    lines.append("")
+    lines.append("### Problem Statement")
+    lines.append("Automated skin-lesion analysis requires accurate, data-efficient models that are easy to reproduce and extend. We target a minimal baseline plus a small novelty under constrained training budgets.")
+    lines.append("")
+    lines.append("### Objectives (2)")
+    obj = str(plan.get("objective", ""))
+    if obj:
+        lines.append(f"- O1: {obj}")
+    else:
+        lines.append("- O1: Establish a minimal, reproducible baseline for skin-cancer classification.")
+    lines.append("- O2: Evaluate a lightweight novelty against the baseline under a small budget.")
+    lines.append("")
+    lines.append("### Research Question (1)")
+    rq = "Can a small, well-scoped novelty outperform a minimal baseline on skin-cancer classification under limited compute?"
+    lines.append(f"- RQ1: {rq}")
+    lines.append("")
+    lines.append("### Contributions (2)")
+    lines.append("- C1: A lean, end-to-end research pipeline (planning → execution → reporting) with guardrails.")
+    lines.append("- C2: A lightweight novelty and evaluation protocol suitable for tight budgets.")
+    lines.append("")
+
+    # Literature Review
+    lines.append("## Literature Review")
     ths = novelty.get("themes") or []
     if ths:
-        lines.append("We group recent ideas into themes and derive our novelty from them:")
+        lines.append("We summarize recent themes and position our approach accordingly:")
         for t in ths[:5]:
             name = t.get("name") or "Theme"
             summary = t.get("summary") or ""
             lines.append(f"- {name}: {summary}")
     else:
-        lines.append("We build on standard baselines and lightweight augmentation/architecture modifications.")
+        lines.append("Prior work spans strong baselines (e.g., ResNet variants) and modest augmentations; our focus is a minimal, reproducible path with a compact novelty.")
     lines.append("")
 
-    lines.append("## Methods")
-    lines.append(f"Objective: {plan.get('objective', '')}")
-    if plan.get("hypotheses"):
-        lines.append("Hypotheses:")
-        for h in plan.get("hypotheses")[:5]:
-            lines.append(f"- {h}")
+    # Methodology with equations
+    lines.append("## Methodology")
+    lines.append("We train a compact CNN backbone with a standard classification head. Below we outline the objective functions used.")
+    # Try to infer task/loss from best run spec
+    task_kind = None
+    loss_name = None
+    if best and isinstance(best, dict):
+        try:
+            spec_b = best.get("spec", {}) or {}
+            task_kind = str(spec_b.get("task") or "").strip().lower() or None
+            loss_name = str(spec_b.get("loss") or "").strip().lower() or None
+        except Exception:
+            task_kind = None
+            loss_name = None
+    # Display equations (Markdown + LaTeX)
+    if task_kind == "regression":
+        lines.append("### Regression Loss")
+        if loss_name in {"l1", "mae"}:
+            lines.append("We use the mean absolute error (MAE):")
+            lines.append("$$\\mathcal{L}_{\\text{MAE}} = \\frac{1}{N} \\sum_{i=1}^{N} \\lVert y_i - \\hat{y}_i \\rVert_1.$$")
+        elif loss_name in {"huber", "smooth_l1"}:
+            lines.append("We use the Huber (Smooth L1) loss with threshold \\delta:")
+            lines.append("$$\\mathcal{L}_{\\delta}(y, \\hat{y}) = \\begin{cases} \\tfrac{1}{2}(y-\\hat{y})^2 & \\text{if } |y-\\hat{y}| \\le \\delta \\cr \\delta |y-\\hat{y}| - \\tfrac{1}{2} \\delta^2 & \\text{otherwise.} \\end{cases}$$")
+        else:
+            lines.append("We use mean squared error (MSE):")
+            lines.append("$$\\mathcal{L}_{\\text{MSE}} = \\frac{1}{N} \\sum_{i=1}^{N} (y_i - \\hat{y}_i)^2.$$")
+    else:
+        lines.append("### Classification Loss")
+        if loss_name in {"bce", "bcewithlogits"}:
+            lines.append("For multi-label settings, we may use binary cross-entropy with logits:")
+            lines.append("$$\\mathcal{L}_{\\text{BCE}} = - \\frac{1}{N} \\sum_{i=1}^{N} \\Big[y_i \\log(\\sigma(z_i)) + (1-y_i) \\log(1-\\sigma(z_i))\\Big].$$")
+        else:
+            lines.append("We use the standard (multi-class) cross-entropy:")
+            lines.append("$$\\mathcal{L}_{\\text{CE}} = - \\frac{1}{N} \\sum_{i=1}^{N} \\log \\frac{e^{z_{i,y_i}}}{\\sum_{c} e^{z_{i,c}}}.$$")
     lines.append("")
 
     lines.append("## Experiments")
@@ -123,7 +187,7 @@ def _render_md(title: str, novelty: Dict[str, Any], plan: Dict[str, Any], summar
     lines.append("")
 
     # Pipeline decision and environment info
-    if isinstance(summary.get("goal_reached"), bool):
+    if isinstance(summary.get("goal_reached") if isinstance(summary, dict) else None, bool):
         lines.append(f"Decision: goal_reached = {summary.get('goal_reached')}")
         lines.append("")
     try:
@@ -149,6 +213,14 @@ def _render_md(title: str, novelty: Dict[str, Any], plan: Dict[str, Any], summar
 
     lines.append("## Conclusion")
     lines.append("We present a lean research pipeline with planning, execution, and reporting. It supports quick iteration and extensions.")
+    lines.append("")
+
+    # Future Work (explicit section)
+    lines.append("## Future Work")
+    lines.append("We outline next steps consistent with the current scope and constraints:")
+    lines.append("- Scale experiments with longer training budgets and larger datasets when resources permit.")
+    lines.append("- Evaluate additional lightweight novelties (e.g., alternative heads, mild augmentations) under the same budget.")
+    lines.append("- Extend tasks (e.g., lesion segmentation or detection) while maintaining reproducibility and guardrails.")
     lines.append("")
 
     return "\n".join(lines)
@@ -218,8 +290,21 @@ def _llm_paper_md(novelty: Dict[str, Any], plan: Dict[str, Any], summary: Dict[s
     system = (
         "You are an expert research writer drafting a Markdown paper under tight compute constraints.\n"
         f"Project goal: {goal}.\n"
-        "Return ONLY Markdown (no code fences). Include sections: Title, Abstract, Introduction, Related Work, Methods, Experimental Setup, Results, Discussion, Limitations, References (optional).\n"
-        "Grounding and safety: use ONLY provided data; do NOT invent numbers, citations, or URLs. If a value is missing, state TBD rather than guessing.\n"
+        "Return ONLY Markdown (no code fences); use LaTeX math ($$...$$) for equations.\n"
+        "Include sections in this order with required structure: \n"
+        "1) Title\n"
+        "2) Abstract\n"
+        "3) Introduction with subsections: Executive Introduction, Problem Statement, Objectives (exactly 2), Research Question (exactly 1), Contributions (exactly 2)\n"
+        "4) Literature Review\n"
+        "5) Methodology (show the training objective equations explicitly; choose CE/BCE/MSE/Huber as appropriate)\n"
+        "6) Experimental Setup\n"
+        "7) Results\n"
+        "8) Discussion\n"
+        "9) Conclusion\n"
+        "10) Future Work\n"
+        "11) Limitations\n"
+        "12) References (optional)\n"
+        "Grounding: use ONLY provided data; do NOT invent numbers, citations, or URLs. If a value is missing, write 'TBD'.\n"
         "Constraints: experiments are <=1 epoch with small steps; keep claims modest and reproducible.\n"
         "Style: objective, concise paragraphs + short bullet lists where helpful."
     )
@@ -272,7 +357,8 @@ def _llm_paper_md(novelty: Dict[str, Any], plan: Dict[str, Any], summary: Dict[s
     return draft
 
 
-def _render_latex(title: str, md_path: pathlib.Path, latex_table: str | None = None, include_fig: bool = False) -> str:
+def _render_latex(title: str, md_path: pathlib.Path, latex_table: str | None = None, include_fig: bool = False, nocite_all: bool = False) -> str:
+    nocite_cmd = "\\nocite{*}" if nocite_all else ""
     return f"""\\documentclass[11pt]{{article}}
 \\usepackage[margin=1in]{{geometry}}
 \\usepackage[T1]{{fontenc}}
@@ -287,11 +373,12 @@ def _render_latex(title: str, md_path: pathlib.Path, latex_table: str | None = N
 \\section*{{Draft}}
 This is an auto-generated draft. Refer to {md_path.name} for Markdown version.
 {('\\section*{Results}\n' + latex_table) if latex_table else ''}
-{('\\begin{figure}[h!]\\centering\\includegraphics[width=\\linewidth]{../runs/accuracy.png}\\caption{Validation Accuracy}\\end{figure}' if include_fig else '')}
-\\bibliographystyle{{plainnat}}
-\\bibliography{{refs}}
-\\end{{document}}
-"""
+    {('\\begin{figure}[h!]\\centering\\includegraphics[width=\\linewidth]{../runs/accuracy.png}\\caption{Validation Accuracy}\\end{figure}' if include_fig else '')}
+    {nocite_cmd}
+    \\bibliographystyle{{plainnat}}
+    \\bibliography{{refs}}
+    \\end{{document}}
+    """
 
 
 def _sanitize_bib_key(s: str) -> str:
@@ -397,6 +484,13 @@ def main() -> None:
     novelty = _read_json(DATA_DIR / "novelty_report.json")
     plan = _read_json(DATA_DIR / "plan.json")
     summary = _read_json(RUNS_DIR / "summary.json")
+    # Robustness: guard against files that contain valid JSON but not an object (e.g., a string)
+    if not isinstance(novelty, dict):
+        novelty = {}
+    if not isinstance(plan, dict):
+        plan = {}
+    if not isinstance(summary, dict):
+        summary = {}
 
     project_title = str(get("project.title", "") or "").strip()
     project_topic = str(get("project.topic", "Skin-Cancer Classification") or "Skin-Cancer Classification")
@@ -407,8 +501,12 @@ def main() -> None:
             title = f"Toward: {idea}"
 
     # Optional LLM drafting mode
-    use_llm = get_bool("pipeline.write_paper.llm.enable", False) or (
+    use_llm = (
+        get_bool("pipeline.write_paper.llm.enable", False)
+        or get_bool("pipeline.write_paper_llm.enable", False)
+        or (
         str(os.getenv("WRITE_PAPER_LLM", "")).lower() in {"1", "true", "yes"}
+        )
     )
     lit_review: Optional[str] = None
     try:
@@ -433,13 +531,17 @@ def main() -> None:
     latex_table = render_mean_std_table_tex(agg) if agg else None
     tex_path = PAPER_DIR / "main.tex"
     img_path = RUNS_DIR / "accuracy.png"
-    tex_path.write_text(_render_latex(title, md_path, latex_table=latex_table, include_fig=img_path.exists()), encoding="utf-8")
-
+    # Try to build refs.bib; then include all entries via \nocite{*} if present
     csv_default = pathlib.Path("abstract_screen_deepseek.csv")
     try:
-        build_bibtex_from_csv(csv_default, PAPER_DIR)
+        bib_path = build_bibtex_from_csv(csv_default, PAPER_DIR)
     except Exception:
-        pass
+        bib_path = None
+    nocite_all = bool(bib_path and pathlib.Path(bib_path).exists())
+    tex_path.write_text(
+        _render_latex(title, md_path, latex_table=latex_table, include_fig=img_path.exists(), nocite_all=nocite_all),
+        encoding="utf-8",
+    )
 
     try_pdflatex(tex_path)
     print(f"[DONE] Wrote paper draft to {md_path} and {tex_path}")
