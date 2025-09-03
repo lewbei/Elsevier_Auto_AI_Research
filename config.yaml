@@ -21,7 +21,7 @@ dataset:
     val: val
     test: test
   # Allow safe fallbacks (e.g., torchvision FakeData) if real dataset not present.
-  allow_fallback: false
+  allow_fallback: true
   # Allow dataset download where supported (e.g., CIFAR10)
   allow_download: false
   # For CIFAR10 only: fraction of train data used as validation
@@ -53,10 +53,10 @@ pipeline:
   skip:
     find_papers: true
     summaries: true
-    novelty: true
+    novelty: false
     idea_blueprints: false
-    planner: true
-    iterate: true
+    planner: false
+    iterate: false
     lit_review: true
     interactive: false
   # Number of iterate cycles (fallback to 2 if unset)
