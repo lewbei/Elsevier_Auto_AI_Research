@@ -64,12 +64,51 @@ def _persona_phase_notes(phase: str, context: Dict[str, Any], steps: int = 2) ->
 
 
 def _run_mod(mod: str, env_overrides: Dict[str, str] | None = None) -> None:
-    cmd = [sys.executable, "-m", mod]
-    print(f"[ORCH] RUN {' '.join(cmd)}")
-    env = os.environ.copy()
+    """Run module programmatically instead of subprocess (per improve_suggest.md)"""
+    print(f"[ORCH] RUN {mod} (programmatic)")
+    
+    # Apply environment overrides temporarily
+    old_env = {}
     if env_overrides:
-        env.update(env_overrides)
-    subprocess.run(cmd, cwd=str(HERE), check=True, env=env)
+        for k, v in env_overrides.items():
+            old_env[k] = os.environ.get(k)
+            os.environ[k] = v
+    
+    try:
+        if mod == "agents.paper_finder":
+            from agents.paper_finder import main
+            main()
+        elif mod == "agents.novelty":
+            from agents.novelty import main
+            main()
+        elif mod == "agents.planner":
+            from agents.planner import main
+            main()
+        elif mod == "agents.interactive":
+            from agents.interactive import main
+            main()
+        elif mod == "agents.iterate":
+            from agents.iterate import main
+            main()
+        elif mod == "agents.write_paper":
+            from agents.write_paper import main
+            main()
+        else:
+            # Fallback to subprocess for unknown modules
+            cmd = [sys.executable, "-m", mod]
+            print(f"[ORCH] FALLBACK {' '.join(cmd)}")
+            env = os.environ.copy()
+            if env_overrides:
+                env.update(env_overrides)
+            subprocess.run(cmd, cwd=str(HERE), check=True, env=env)
+    finally:
+        # Restore environment
+        if env_overrides:
+            for k, v in env_overrides.items():
+                if old_env[k] is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = old_env[k]
 
 
 def main() -> None:

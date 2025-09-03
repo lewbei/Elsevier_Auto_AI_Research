@@ -185,15 +185,18 @@ def _run_real(spec: Dict[str, Any]) -> Dict[str, Any]:
             ds_test = FakeData(size=int(spec.get("fallback_test_size", 50)), image_size=(3, input_size, input_size),
                                num_classes=num_classes, transform=tfm_val)
         else:
+            diagnostic_msg = (f"ImageFolder dataset not found under {data_dir} "
+                            f"(expected {train_dir.name}/ and {val_dir.name}/ folders). "
+                            f"Set dataset.allow_fallback=true to use synthetic data for testing.")
             res = {
                 "mode": "stub",
-                "reason": f"ImageFolder dataset not found under {data_dir} (expect {train_dir.name}/ and {val_dir.name}/ folders)",
+                "reason": diagnostic_msg,
                 "started": _now(),
                 "finished": _now(),
                 "metrics": {"val_accuracy": 0.0, "test_accuracy": 0.0},
             }
             if is_verbose():
-                vprint(res["reason"])
+                vprint(f"[DATASET ERROR] {diagnostic_msg}")
             return res
     elif kind == "cifar10":
         try:

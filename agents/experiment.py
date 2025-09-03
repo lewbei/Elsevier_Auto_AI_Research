@@ -1,3 +1,13 @@
+"""
+DEPRECATED DEMO: Simple single-experiment runner.
+
+This is a standalone demo script that runs a single experiment based on novelty report.
+For production use, the main pipeline uses agents/iterate.py which handles multiple 
+experiment variants, mutations, and statistical analysis.
+
+This file is kept as a reference/demo for simple experiment execution.
+Use agents/iterate.py (via run_pipeline.py) for the full research pipeline.
+"""
 import json
 import pathlib
 from typing import Any, Dict
