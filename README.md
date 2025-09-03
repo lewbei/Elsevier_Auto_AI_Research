@@ -32,6 +32,8 @@ This system automates the complete research workflow from literature review to e
   - `DEEPSEEK_API_KEY` or OpenAI API key: For LLM operations
   - `X_ELS_INSTTOKEN` (optional): For enhanced Elsevier access
 
+> **⚠️ Important**: If you only have an `ELSEVIER_KEY` (without `X_ELS_INSTTOKEN`), you must access the API from within your institution's IP address range. The institution token allows access from any IP address.
+
 ## 🛠️ Installation
 
 1. **Clone the repository**:
@@ -65,8 +67,10 @@ Create a `.env` file with your API credentials:
 ```env
 ELSEVIER_KEY=your_elsevier_api_key
 DEEPSEEK_API_KEY=your_deepseek_api_key
-X_ELS_INSTTOKEN=your_elsevier_token  # optional
+X_ELS_INSTTOKEN=your_elsevier_token  # optional - enables access from any IP
 ```
+
+> **Note**: Without `X_ELS_INSTTOKEN`, you must run this from your institution's network to access Elsevier APIs.
 
 ### YAML Configuration
 
@@ -306,6 +310,13 @@ If you encounter any issues or have questions:
 1. Check the [existing issues](https://github.com/lewbei/Elsevier_Auto_AI_Research/issues)
 2. Create a new issue with detailed information
 3. Include relevant configuration and error messages
+
+### Common Issues
+
+**Elsevier API Access Errors**: If you're getting authentication errors with the Elsevier API:
+- Ensure you're using your institution's network if you don't have an `X_ELS_INSTTOKEN`
+- Contact your institution's library to obtain an institution token for off-campus access
+- Verify your API key is active and has not expired
 
 ## 🔮 Roadmap
 
