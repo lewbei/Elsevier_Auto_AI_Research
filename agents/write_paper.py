@@ -6,6 +6,7 @@ and a brief reflection pass for clarity/consistency.
 """
 
 import json
+import re
 import os
 import pathlib
 import shutil
@@ -118,28 +119,22 @@ def _render_md(title: str, novelty: Dict[str, Any], plan: Dict[str, Any], summar
     lines.append("### Gap and Rationale")
     lines.append("Despite progress, a gap remains for methods that target the constrained regime while isolating contributions beyond capacity increases; this motivates the proposed lightweight intervention.")
     lines.append("")
-    # Objectives (paragraph form)
+    # Objectives (explicit sentences)
     lines.append("### Objectives")
-    obj = str(plan.get("objective", ""))
+    obj = str(plan.get("objective", "")).strip()
     if obj:
-        lines.append(
-            f"The primary objective is {obj}. A secondary objective is to evaluate a lightweight novelty against a minimal baseline under a small training budget."
-        )
+        lines.append(f"The first objective is {obj}.")
     else:
-        lines.append(
-            "The primary objective is to establish a minimal, reproducible baseline for skin‑cancer classification. "
-            "A secondary objective is to evaluate a lightweight novelty against the baseline under a small training budget."
-        )
+        lines.append("The first objective is to establish a minimal, reproducible baseline for skin‑cancer classification.")
+    lines.append("The second objective is to evaluate a lightweight novelty against a minimal baseline under a small training budget.")
     lines.append("")
     lines.append("### Research Question")
     rq = "Can a small, well-scoped novelty outperform a minimal baseline on skin-cancer classification under limited compute?"
-    lines.append(f"The central research question is: {rq}.")
+    lines.append(f"The research question is: {rq}.")
     lines.append("")
     lines.append("### Contributions")
-    lines.append(
-        "Key contributions include a lean, end‑to‑end research pipeline (planning → execution → reporting) with guardrails, "
-        "and a lightweight novelty with an evaluation protocol suitable for tight budgets."
-    )
+    lines.append("The first contribution is a lean, end‑to‑end research pipeline (planning → execution → reporting) with guardrails.")
+    lines.append("The second contribution is a lightweight novelty with an evaluation protocol suitable for tight budgets.")
     # Optional page reminder after Introduction
     page_reminder = bool(get("pipeline.write_paper.style.page_reminder_after_intro", get("pipeline.write_paper_style.page_reminder_after_intro", False)))
     if page_reminder:
@@ -159,10 +154,13 @@ def _render_md(title: str, novelty: Dict[str, Any], plan: Dict[str, Any], summar
     else:
         lines.append("Prior work spans strong baselines (e.g., ResNet variants) and modest augmentations; our focus is a minimal, reproducible path with a compact novelty.")
     lines.append("")
-    # Close Related Work with the explicit gap and how the method fills it
+    # Close Related Work with an explicit Research Gap subsection
     gap_stmt = "A clear gap remains for methods that explicitly address tight compute and data constraints without relying on capacity increases."
     nfocus = str(plan.get("novelty_focus", "the proposed lightweight mechanism")) or "the proposed lightweight mechanism"
-    lines.append(f"Research Gap and How It Is Filled: {gap_stmt} The approach fills this gap by introducing {nfocus} that targets the constrained regime and is testable against capacity-matched controls.")
+    lines.append("### Research Gap")
+    lines.append(
+        f"{gap_stmt} The proposed method introduces {nfocus} to directly address this gap under constrained budgets, and it is evaluated against capacity-matched controls to isolate its contribution."
+    )
     lines.append("")
 
     # Methods with data and objective details
@@ -345,6 +343,70 @@ def _sanitize_markdown(md: str) -> str:
     return "\n".join(out)
 
 
+def _count_words(md: str) -> int:
+    if not md:
+        return 0
+    # Rough word counter: sequences of alphanumerics/apostrophes considered words
+    return len(re.findall(r"[A-Za-z0-9']+", md))
+
+
+def _maybe_expand_to_min_words(
+    md: str,
+    *,
+    min_words: int,
+    referent: str,
+    req_timeout: int,
+    max_tries: int,
+) -> str:
+    """If md has fewer than min_words, ask the LLM to expand existing sections.
+
+    Rules:
+    - Do not add new sections; preserve existing headings and their order.
+    - Keep 'Future Work' as the last section; do not add 'References'.
+    - No invented numbers/citations; expand via descriptions, clarifications, mechanisms, and prose depth.
+    - Maintain third-person style with the given referent phrase.
+    """
+    try:
+        cur = _count_words(md)
+        if cur >= int(min_words):
+            return md
+        target = int(min_words)
+        system = (
+            "You are an expert copy editor expanding a research paper draft in Markdown.\n"
+            "Preserve all existing section headings and their order.\n"
+            "Do NOT add new sections; keep 'Future Work' as the last section and do not add 'References'.\n"
+            "Do NOT introduce new numeric claims, datasets, or citations beyond what is present; expand by elaborating explanations and mechanisms in prose.\n"
+            f"Maintain strict third-person voice (no 'we'/'I'); prefer the referent phrase '{referent}'. Use a formal academic tone; avoid hype/bombastic adjectives.\n"
+            "Return FULL Markdown only (no code fences)."
+        )
+        user = {
+            "min_words": target,
+            "instructions": [
+                "Expand each existing section with additional non-redundant detail and clarifications.",
+                "Do not add new sections; do not rename or reorder sections.",
+                "Do not add References; end at the existing 'Future Work' section.",
+                "Do not invent numbers or citations; keep quantitative claims as-is.",
+                "Use cohesive paragraphs; no bullet lists.",
+                "Ensure the Introduction contains explicit sentences: The first objective is..., The second objective is..., The research question is..., The first contribution is..., The second contribution is...",
+            ],
+            "draft": _cap(md, 60000),
+        }
+        for _ in range(2):  # a couple of attempts to reach target length
+            expanded = chat_text_cached([
+                {"role": "system", "content": system},
+                {"role": "user", "content": json.dumps(user, ensure_ascii=False)},
+            ], temperature=0.2, timeout=req_timeout, max_tries=max_tries).strip()
+            if expanded:
+                expanded = _sanitize_markdown(expanded)
+                if _count_words(expanded) >= target:
+                    return expanded
+                # Use the expanded content as the next draft for further enrichment
+                user["draft"] = _cap(expanded, 120000)
+        return expanded or md
+    except Exception:
+        return md
+
+
 def _compose_abstract(*, goal: str, referent: str, baseline_acc: float, novelty_acc: float,
                       agg: Dict[str, Dict[str, float]] | None, plan: Dict[str, Any]) -> str:
     """Compose a one-paragraph abstract (150–250 words) with the specified structure.
@@ -416,7 +478,7 @@ def _page_reminder_text() -> str:
     """
     return (
         "Page reminder: Introduction sets context and motivation, outlines the problems faced, summarizes current solutions, states the gap and rationale, and clarifies objectives, research question, and contributions. "
-        "Related Work positions the study in prior literature and states the gap and how the method fills it. Methodology details the proposed model’s architecture, components, mechanisms, and training objective. "
+        "Related Work positions the study in prior literature and ends with a 'Research Gap' subsection that states the gap and how the method fills it. Methodology details the proposed model’s architecture, components, mechanisms, and training objective. "
         "Experimental Setup specifies datasets, splits, metrics, budgets, seeds, and summarizes the model configuration. Results report baseline, novelty, and ablation outcomes with tables and analysis. "
         "Ablations isolate the effect of the proposed change. Discussion interprets findings and notes threats to validity. "
         "Limitations scope the claims. Conclusion synthesizes takeaways. Future Work outlines next steps."
@@ -501,13 +563,13 @@ def _llm_paper_md(
         "You are an expert research writer drafting a Markdown paper under tight compute constraints.\n"
         f"Project goal: {goal}.\n"
         "Return ONLY Markdown (no code fences); use LaTeX math ($$...$$) for equations.\n"
-        "Audience and tone: peer-reviewed journal style (objective, precise, well-structured), not a blog post.\n"
+        "Audience and tone: peer-reviewed journal style (objective, precise, well-structured, formal tone), not a blog post.\n"
         f"Length: write at least {min_words} words overall.\n"
         "Include sections in this order with required structure: \n"
         "1) Title\n"
         "2) Abstract\n"
-        "3) Introduction (cohesive prose; do NOT include 'What/Why/How' subsections)\n"
-        "4) Related Work (situate within themes; avoid invented claims)\n"
+        "3) Introduction (cohesive prose; do NOT include 'What/Why/How' subsections). Within the Introduction include explicit sentences: 'The first objective is ...', 'The second objective is ...', 'The research question is ...', 'The first contribution is ...', 'The second contribution is ...'.\n"
+        "4) Related Work (situate within themes; avoid invented claims; END with a 'Research Gap' subsection that clearly states the gap and how the method fills it)\n"
         "5) Methodology (proposed model only; architecture/components/mechanisms and the training objective with explicit equations CE/BCE/MSE/Huber; highly detailed)\n"
         "6) Experimental Setup (datasets/splits/metrics/budget/seeds, and a model configuration summary with backbone, input size, params/epochs/steps/lr)\n"
         "7) Results (tables + textual analysis; compare baseline/novelty/ablation; include quantitative results, robustness, efficiency, and error analysis)\n"
@@ -518,7 +580,7 @@ def _llm_paper_md(
         "12) Future Work (this is the LAST section; do not include any sections after it)\n"
         "Grounding: use ONLY provided data; do NOT invent numbers, citations, or URLs. If a value is missing, write 'TBD'.\n"
         "Constraints: experiments are <=1 epoch with small steps; keep claims modest and reproducible.\n"
-        f"Style: objective and third-person (no 'we', 'I', or 'our'); when a subject is needed, use the referent phrase '{referent}'; use cohesive paragraphs; do NOT use bullet or numbered lists anywhere."
+        f"Style: objective and third-person (no 'we', 'I', or 'our'); when a subject is needed, use the referent phrase '{referent}'; use cohesive paragraphs; do NOT use bullet or numbered lists anywhere; avoid bombastic adjectives and hype (e.g., 'novel', 'state-of-the-art', 'remarkable', 'extraordinary', 'extremely', 'dramatically')."
         "\n\nAbstract requirements (strict): one paragraph, 150–250 words, active voice. No citations, undefined acronyms, or forward references. Order the content: Problem (present), Gap (present), Contribution (present), Setup (past), Results (past with 2–3 hard numbers and ±95% CI when available), Implication+Scope (present). Avoid future tense in the abstract."
         "\n\nRelated Work requirements: at least 8 paragraphs; end the section with a concise paragraph that clearly states the research gap and how the proposed method fills that gap (no bullets)."
         "\nMethodology requirements: at least 8 paragraphs; include the following subsections and content in prose (no bullets): Overview; Components; Mechanism; Mathematical Formulation (explicit symbols and equations); Hyperparameters and Training Schedule; Implementation Details (layers, shapes, activations, normalization, initialization)."
@@ -555,8 +617,10 @@ def _llm_paper_md(
             "Report numbers exactly as given (val/test metrics only if present)",
             "Cite only if citation strings are provided (else omit)",
             "Keep each section substantial; meet minimal paragraph counts",
+            "Use a formal academic tone; avoid hype and rhetorical adjectives (e.g., 'novel', 'state-of-the-art', 'remarkable', 'extraordinary', 'extremely', 'dramatically').",
+            "Ensure the Introduction includes the exact sentences: 'The first objective is ...', 'The second objective is ...', 'The research question is ...', 'The first contribution is ...', 'The second contribution is ...'.",
             f"Target overall length >= {min_words} words",
-            "Related Work must end with a paragraph that states the research gap and how the proposed method fills it (prose only).",
+            "Related Work must end with a 'Research Gap' subsection that clearly states the gap and how the proposed method fills it (prose only).",
             "Experimental Setup must include dataset names/paths, the evaluation metrics, and a model configuration summary (backbone, input size, params/epochs/steps/lr) using available spec or 'TBD'.",
             "Results must restate evaluation metrics and include 2–3 hard numbers; discuss in light of configuration and budgets.",
             "Discussion must connect the outcomes to the dataset/evaluation/configuration and clearly tie back to the gap and how it is filled.",
@@ -577,6 +641,7 @@ def _llm_paper_md(
         "You are a careful reviewer. Revise the draft Markdown to improve clarity, fix inconsistencies, and remove any invented content.\n"
         "Maintain the same sections and satisfy minimal paragraph counts if any are below target.\n"
         f"Enforce third-person voice only (no 'we', 'I', or 'our'); prefer the referent phrase '{referent}' for subject; remove any bullet or numbered lists and convert them to prose.\n"
+        "Use a formal academic tone; avoid hype/bombastic adjectives (e.g., 'novel', 'state-of-the-art', 'remarkable', 'extraordinary', 'extremely', 'dramatically').\n"
         "Return FULL Markdown (no code fences)."
     )
     reflect_user = {
@@ -584,7 +649,8 @@ def _llm_paper_md(
         "checks": [
             "Numbers appear only where provided in runs/summary",
             "Methods/setup match constraints and plan",
-            "No missing sections; remove hype; keep objective tone"
+            "No missing sections; remove hype; keep objective formal tone",
+            "Ensure the Introduction contains the explicit sentences: The first objective is..., The second objective is..., The research question is..., The first contribution is..., The second contribution is..."
         ],
         "self_check": "Before responding, ensure the output is complete Markdown, not partial, and contains no fenced code.",
     }
@@ -601,8 +667,78 @@ def _llm_paper_md(
     return draft
 
 
+def _latex_escape_text(s: str) -> str:
+    # Minimal escaping suitable for prose; math blocks handled separately
+    return (
+        s.replace("\\", "\\textbackslash{}")
+         .replace("&", "\\&")
+         .replace("%", "\\%")
+         .replace("#", "\\#")
+         .replace("_", "\\_")
+         .replace("{", "\\{")
+         .replace("}", "\\}")
+    )
+
+
+def _md_to_latex(md: str) -> str:
+    """Very small, deterministic Markdown→LaTeX for our paper structure.
+
+    - Drops the first '# Title' line (LaTeX \\title handles it)
+    - Maps '## '→\\section, '### '→\\subsection
+    - Preserves $$...$$ math blocks verbatim
+    - Escapes special chars in prose lines; skips Markdown tables and images (handled elsewhere)
+    """
+    lines = md.splitlines()
+    out: List[str] = []
+    i = 0
+    # Drop top-level markdown title if present
+    if lines and lines[0].lstrip().startswith('# '):
+        i = 1
+    in_math = False
+    while i < len(lines):
+        l = lines[i]
+        ls = l.strip()
+        # Math block toggling
+        if ls.startswith('$$'):
+            out.append(l)
+            in_math = not in_math
+            i += 1
+            continue
+        if in_math:
+            out.append(l)
+            i += 1
+            continue
+        # Headings
+        if ls.startswith('### '):
+            hdr = ls[4:].strip()
+            out.append(f"\\subsection{{{_latex_escape_text(hdr)}}}")
+        elif ls.startswith('## '):
+            hdr = ls[3:].strip()
+            out.append(f"\\section{{{_latex_escape_text(hdr)}}}")
+        # Skip images and raw markdown tables
+        elif ls.startswith('![') or ls.startswith('|'):
+            pass
+        # Blank line → paragraph break
+        elif ls == '':
+            out.append('')
+        else:
+            out.append(_latex_escape_text(l))
+        i += 1
+    return "\n".join(out)
+
+
 def _render_latex(title: str, md_path: pathlib.Path, latex_table: str | None = None, include_fig: bool = False, nocite_all: bool = False) -> str:
     nocite_cmd = "\\nocite{*}" if nocite_all else ""
+    try:
+        md = md_path.read_text(encoding="utf-8")
+    except Exception:
+        md = ""
+    body = _md_to_latex(md) if md else "This is an auto-generated draft. See paper.md."
+    fig_block = (
+        "\\begin{figure}[h!]\\centering\\includegraphics[width=\\linewidth]{../runs/accuracy.png}\\caption{Validation Accuracy}\\end{figure}"
+        if include_fig else ""
+    )
+    res_table = ("\\section*{Results}\n" + latex_table) if latex_table else ""
     return f"""\\documentclass[11pt]{{article}}
 \\usepackage[margin=1in]{{geometry}}
 \\usepackage[T1]{{fontenc}}
@@ -614,15 +750,14 @@ def _render_latex(title: str, md_path: pathlib.Path, latex_table: str | None = N
 \\date{{}}
 \\begin{{document}}
 \\maketitle
-\\section*{{Draft}}
-This is an auto-generated draft. Refer to {md_path.name} for Markdown version.
-{('\\section*{Results}\n' + latex_table) if latex_table else ''}
-    {('\\begin{figure}[h!]\\centering\\includegraphics[width=\\linewidth]{../runs/accuracy.png}\\caption{Validation Accuracy}\\end{figure}' if include_fig else '')}
-    {nocite_cmd}
-    \\bibliographystyle{{plainnat}}
-    \\bibliography{{refs}}
-    \\end{{document}}
-    """
+{body}
+{res_table}
+{fig_block}
+{nocite_cmd}
+\\bibliographystyle{{plainnat}}
+\\bibliography{{refs}}
+\\end{{document}}
+"""
 
 
 def _sanitize_bib_key(s: str) -> str:
@@ -795,6 +930,64 @@ def main() -> None:
     )
     # Post-process to remove repeated sections or duplicate papers
     md = _sanitize_markdown(md)
+    # Ensure Introduction explicitly contains objectives, research question, and contributions in the required phrasing
+    def _enforce_intro(md_text: str) -> str:
+        try:
+            # Quick scan for required phrases
+            needs = [
+                "The first objective is",
+                "The second objective is",
+                "The research question is",
+                "The first contribution is",
+                "The second contribution is",
+            ]
+            if all(p in md_text for p in needs):
+                return md_text
+            # Extract Introduction section only
+            lines = md_text.splitlines()
+            intro_start = None
+            for i, l in enumerate(lines):
+                if l.strip().lower() == "## introduction":
+                    intro_start = i
+                    break
+            if intro_start is None:
+                return md_text
+            j = intro_start + 1
+            while j < len(lines) and not lines[j].startswith("## "):
+                j += 1
+            intro_md = "\n".join(lines[intro_start:j])
+            system = (
+                "You are a careful editor. Rewrite the Introduction section to include explicit sentences with formal tone:\n"
+                "- 'The first objective is ...'\n- 'The second objective is ...'\n- 'The research question is ...'\n- 'The first contribution is ...'\n- 'The second contribution is ...'\n"
+                "Keep existing content and structure otherwise; do not add bullets or new sections; maintain third-person and formal tone. Return only the updated Introduction section in Markdown."
+            )
+            revised = chat_text_cached([
+                {"role": "system", "content": system},
+                {"role": "user", "content": intro_md},
+            ], temperature=0.0, timeout=req_timeout, max_tries=req_retries).strip()
+            if revised and revised.lower().startswith("## introduction"):
+                new = lines[:intro_start] + revised.splitlines() + lines[j:]
+                return "\n".join(new)
+            return md_text
+        except Exception:
+            return md_text
+    md = _enforce_intro(md)
+    # Enforce minimum length (at least config min_words, and no less than 10k as per preference)
+    try:
+        referent = str(
+            get("pipeline.write_paper.style.referent", get("pipeline.write_paper_style.referent", "This study"))
+            or "This study"
+        )
+    except Exception:
+        referent = "This study"
+    min_enforced = max(10000, int(min_words or 0))
+    md = _maybe_expand_to_min_words(
+        md,
+        min_words=min_enforced,
+        referent=referent,
+        req_timeout=req_timeout,
+        max_tries=req_retries,
+    )
     md_path = PAPER_DIR / "paper.md"
     md_path.write_text(md, encoding="utf-8")
 
