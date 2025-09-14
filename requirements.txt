@@ -5,3 +5,6 @@ numpy
 pyyaml
 torch; sys_platform == 'linux' or sys_platform == 'darwin'
 torchvision; sys_platform == 'linux' or sys_platform == 'darwin'
+transformers>=4.40.0
+sentencepiece>=0.1.99
+faiss-cpu>=1.8.0

@@ -5,6 +5,7 @@ from pathlib import Path
 
 from utils.pdf_utils import extract_text_from_pdf
 from utils.llm_utils import chat_json, LLMError
+from lab.config import get as _cfg_get
 
 
 def _truncate(s: str, n: int) -> str:
@@ -856,6 +857,25 @@ def process_pdfs(
                 print(f"[SUM]  • critic failed: {pdf.name} :: {exc}")
             crit = {"novelty_strength": "", "possible_prior_overlap": [], "weaknesses": [], "followup_experiments": []}
         record = {"summary": summ, "critic": crit}
+        # Optional embeddings (GPU-only, hard-fail when enabled)
+        try:
+            emb_enable = bool(_cfg_get("embeddings.enable", False))
+        except Exception:
+            emb_enable = False
+        if emb_enable:
+            from utils.embeddings import embed_and_store, compute_summary_text
+            provider = str(_cfg_get("embeddings.provider", "huggingface") or "huggingface").strip().lower()
+            model_name = str(_cfg_get("embeddings.model", "google/embeddinggemma-300m") or "google/embeddinggemma-300m")
+            dtype = str(_cfg_get("embeddings.dtype", "float16") or "float16")
+            bs = int(_cfg_get("embeddings.batch_size", 8) or 8)
+            max_len = int(_cfg_get("embeddings.max_length", 1024) or 1024)
+            content = str(_cfg_get("embeddings.content", "raw_pdf") or "raw_pdf").strip().lower()
+            # Prefer raw PDF text as requested; else summary_text
+            if content in {"raw_pdf", "both"}:
+                _ = embed_and_store(pdf.stem, text, provider=provider, model=model_name, batch_size=bs, max_length=max_len, dtype=dtype)
+            if content in {"summary_text", "both"}:
+                st = compute_summary_text(summ)
+                _ = embed_and_store(pdf.stem + "_summary", st, provider=provider, model=model_name, batch_size=bs, max_length=max_len, dtype=dtype)
         try:
             out_path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
             if verbose:

@@ -9,6 +9,7 @@ from lab.config import get
 from lab.logging_utils import is_verbose, vprint, append_jsonl
 from lab.novelty_facets import extract_facets
 from lab.novelty_scoring import score_and_filter_ideas
+import numpy as _np
 
 try:
     # Optional: multi‑persona discussion helpers
@@ -911,6 +912,51 @@ def main() -> None:
             print(f"[NOVELTY] Loaded {len(summaries)} summaries from {SUM_DIR}")
         except Exception:
             pass
+
+    # Optional: build FAISS-GPU index and compute neighbors among papers
+    try:
+        from lab.config import get as _cfg_get
+        emb_enable = bool(_cfg_get("embeddings.enable", False))
+        ret_enable = bool(_cfg_get("embeddings.retrieval.enable", False))
+    except Exception:
+        emb_enable = False
+        ret_enable = False
+    if emb_enable and ret_enable:
+        from utils.embeddings import build_faiss_cpu_index, build_faiss_gpu_index
+        model_name = str(_cfg_get("embeddings.model", "google/embeddinggemma-300m") or "google/embeddinggemma-300m")
+        index_type = str(_cfg_get("embeddings.retrieval.index", "faiss-cpu") or "faiss-cpu").strip().lower()
+        if _progress:
+            try:
+                print(f"[NOVELTY] Building {index_type.upper()} index for embeddings model '{model_name}' …")
+            except Exception:
+                pass
+        if index_type == "faiss-cpu":
+            index, vec_paths = build_faiss_cpu_index(model_name)
+        elif index_type == "faiss-gpu":
+            index, vec_paths = build_faiss_gpu_index(model_name)
+        else:
+            raise RuntimeError(f"unknown retrieval index: {index_type}")
+        # Load vectors back (aligned with index IDs)
+        X = _np.vstack([_np.load(p).astype(_np.float32) for p in vec_paths])
+        D, I = index.search(X, int(_cfg_get("embeddings.retrieval.top_k", 8) or 8) + 1)
+        # Build neighbor map excluding self (first neighbor)
+        neighbors = {}
+        keys = [pathlib.Path(p).stem for p in vec_paths]
+        for row, key in enumerate(keys):
+            ids = list(I[row])
+            sims = list(D[row])
+            out = []
+            for j, idx in enumerate(ids):
+                if idx == row:
+                    continue  # skip self
+                out.append({"key": keys[idx], "sim": float(sims[j])})
+            neighbors[key] = out
+        (DATA_DIR / "retrieval_neighbors.json").write_text(json.dumps(neighbors, ensure_ascii=False, indent=2), encoding="utf-8")
+        if _progress:
+            try:
+                print(f"[NOVELTY] Wrote retrieval neighbors: {DATA_DIR / 'retrieval_neighbors.json'}")
+            except Exception:
+                pass
 
     # Build facets from your summaries and persist for audit (used by personas too)
     facets = extract_facets([s["summary"] for s in summaries], persist=True)

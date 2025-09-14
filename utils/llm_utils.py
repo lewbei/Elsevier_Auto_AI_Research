@@ -63,13 +63,26 @@ LLM_API_KEY = os.getenv(_API_ENV_NAME) or DEEPSEEK_API_KEY
 
 
 def _normalize_model(provider: str, model: Optional[str]) -> str:
-    """Normalize model names per provider. For OpenAI, restrict to gpt‑5 mini/nano.
+    """Normalize model names per provider.
 
-    Returns a safe model string. If a non‑allowed OpenAI model is provided, falls back to gpt‑5-mini.
+    For provider 'openai', allow non-GPT‑5 models when a custom chat_url is configured
+    or when llm.allow_custom_openai_models is true. This supports OpenAI‑compatible
+    endpoints (e.g., Z.AI GLM‑4.5) without requiring the 'custom' profile path.
+    Otherwise restrict to GPT‑5 mini/nano and fall back to 'gpt-5-mini'.
     """
+    from lab.config import get as _get  # lazy import to avoid cycles
+
     m = (model or LLM_MODEL) or ""
     m = str(m).strip()
     if provider == "openai":
+        try:
+            allow_custom = bool(_get("llm.allow_custom_openai_models", False))
+        except Exception:
+            allow_custom = False
+        # If a custom chat_url is configured, allow arbitrary model (OpenAI‑compatible endpoint)
+        custom_endpoint = (LLM_CHAT_URL != _default_url_for("openai"))
+        if allow_custom or custom_endpoint:
+            return m
         allowed = {"gpt-5-mini", "gpt-5-nano"}
         if m not in allowed:
             try:

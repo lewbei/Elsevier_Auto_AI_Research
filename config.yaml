@@ -3,7 +3,7 @@
 
 project:
   # Only prompt override: the goal (domain-agnostic)
-  goal: "i want to do skin cancer classification and detection using deep learning model"
+  goal: "i want to do human pose classification using deep learning with few shot learning"
   # Optional explicit title (used in paper/report); leave empty to auto-generate
   title: ""
 
@@ -38,29 +38,133 @@ research:
   num_contributions: 2
   num_questions: 1
 
-# Global LLM profiles and default selection
-llm:
-  # Aliases map to providers via utils.llm_utils
-  default: gpt-5-mini   # OpenAI GPT‑5 mini
-  custom: deepseek      # DeepSeek chat
-  use: default          # fallback profile when per-agent is omitted
-  # Streaming toggle for LLM calls (chat_text and chat_json)
-  stream: true
+  # ---------------------------------------------------------------------------
+  # Provider Examples (uncomment and adjust; then set `use: custom` and point
+  # each stage to `llm: custom` to route through your chosen provider/model)
+  #
+  # 1) Z.AI GLM‑4.5 (OpenAI‑compatible)
+  #    - API provider: OpenAI compatible
+  #    - Base URL: https://api.z.ai/api/coding/paas/v4
+  #    - Chat endpoint: append /chat/completions
+  #    - API key env: ZAI_API_KEY
+  #
+  llm:
+    provider: openai
+    model: glm-4.5
+    chat_url: https://api.z.ai/api/coding/paas/v4/chat/completions
+    api_key_env: ZAI_API_KEY
+    default: ""          # no alias; stages use the main provider/model
+    custom: ""           # not used
+    use: default         # all stages use the main provider
+    stream: true
+    strict: true
+    allow_custom_openai_models: true
+    retry:
+      max_tries: 4
+      backoff_initial: 2
+      backoff_max: 60
+  #
+  # 2) DeepSeek (built‑in alias)
+  #  llm:
+  #    provider: openai    # leave as-is (ignored when using alias)
+  #    model: ""
+  #    chat_url: ""
+  #    api_key_env: ""
+  #    default: gpt-5-mini
+  #    custom: deepseek    # alias resolved to provider=deepseek, model=deepseek-chat
+  #    use: custom
+  #    stream: true
+  #    strict: true
+  #  Env: DEEPSEEK_API_KEY=****
+  #
+  # 3) DeepSeek (globals)
+  #  llm:
+  #    provider: deepseek
+  #    model: deepseek-chat
+  #    chat_url: ""        # defaults to https://api.deepseek.com/chat/completions
+  #    api_key_env: DEEPSEEK_API_KEY
+  #    default: gpt-5-mini
+  #    custom: ""
+  #    use: custom
+  #    stream: true
+  #    strict: true
+  #
+  # 4) OpenRouter (globals)
+  #  llm:
+  #    provider: openrouter
+  #    model: openai/gpt-5-nano   # pick any model id from OpenRouter
+  #    chat_url: ""               # defaults to https://openrouter.ai/api/v1/chat/completions
+  #    api_key_env: OPENROUTER_API_KEY
+  #    default: gpt-5-mini
+  #    custom: ""
+  #    use: custom
+  #    stream: true
+  #    strict: true
+  #  Optional courtesy envs: OPENROUTER_SITE, OPENROUTER_TITLE
+  #
+  # Stage routing when using `use: custom` (set in each stage):
+  #
+  #  pipeline:
+  #    summarize:
+  #      llm: custom
+  #    novelty:
+  #      llm: custom
+  #    planner:
+  #      llm: custom
+  #    iterate:
+  #      llm: custom
+  #    codegen:
+  #      llm: custom
+  #    idea_blueprints:
+  #      llm: custom
+  #    interactive:
+  #      llm: custom
+
+# Embeddings and retrieval configuration (GPU-first, hard-fail when enabled)
+embeddings:
+  enable: false                 # set true to compute/store vectors
+  provider: huggingface         # huggingface | openai
+  model: google/embeddinggemma-300m
+  dtype: float16                # float16 | float32
+  batch_size: 2                 # default for 4GB VRAM; raise if headroom allows
+  max_length: 1024              # token cap per text
+  content: both                 # raw_pdf | summary_text | both (both improves relevance at small scale)
+  aggregate: none               # none (no aggregator). (planned: mean for chunked pooling)
+  cache: true                   # cache vectors under data/embeddings/{model}/
+  retrieval:
+    enable: true
+    index: faiss-cpu            # faiss-cpu
+    top_k: 8
+    min_sim: 0.30
+
+# Optional platform settings
+telemetry:
+  enable_latency_html: true     # write runs/stage_latency.html
+  enable_stage_histograms: true # (planned) record per-stage histograms
+  enable_cost_summary: true     # keep runs/llm_cost.json updated
+  budgets:
+    enable: false               # when true, enforce caps below (planned)
+    max_cost_usd: 0.0
+    max_tokens: 0
 
 # Pipeline controls (YAML-first). All are optional.
 pipeline:
   # Skip stages automatically without CLI or env flags
   skip:
-    find_papers: true
-    summaries: true
-    novelty: true
+    find_papers: false
+    summaries: false
+    novelty: false
     idea_blueprints: false
-    planner: true
-    iterate: true
-    lit_review: true
+    planner: false
+    iterate: false
+    lit_review: false
     interactive: false
   # Number of iterate cycles (fallback to 2 if unset)
   max_iters: 2
+  orchestrator:
+    phase_steps: 2
+    personas:
+      enable: false
   # Write paper draft at the end
   write_paper: true
   # Paper drafting options (LLM-enabled drafting)
@@ -82,6 +186,8 @@ pipeline:
     save_raw: false       # save intermediate JSON files (*.pass1.json, *.merged.json, ...)
     print_raw: true       # print final LLM JSON (pre-validate) to console
     force_chunk: false    # force chunking instead of full-text pass
+    skip_existing: true   # skip re-summarizing existing JSONs
+    num_workers: 2        # planned: parallel PDF processing
     # Timeouts/retries (seconds/attempts). Full-text often needs longer.
     timeout: 60           # per-call timeout for chunked requests
     timeout_full: 180     # per-call timeout for full-text request
@@ -96,8 +202,13 @@ pipeline:
   # Novelty agent configuration
   novelty:
     llm: default
+    model: ""
     # Per-stage streaming toggle
     stream: true
+    print_progress: true
+    request_timeout: 60
+    sampling:
+      temperatures: [0.2]
     personas:
       enable: true
       steps: 4
@@ -110,16 +221,31 @@ pipeline:
         # max_rounds: 0  # 0 → auto-cap
     uniqueness:
       enable: true
+    detailed_ideas: true
+    only_ideas: false
+    scoring:
+      diversity: true
+      diversity_weight: 0.3
+      similarity_threshold: 0.85
+    clustering:                 # (planned) pre-cluster embeddings before LLM synthesis
+      enable: false
+      method: kmeans            # kmeans | hdbscan
+      k_min: 3
+      k_max: 6
 
   # Planner agent configuration
   planner:
     llm: default
+    model: ""
+    request_timeout: 60
+    request_retries: 2
     personas:
       enable: true
 
   # Iterate agent configuration
   iterate:
     llm: default
+    model: ""
     personas:
       enable: true    # optional persona notes for iterate (off by default)
 
@@ -127,20 +253,71 @@ pipeline:
   codegen:
     enable: true      # LLM-driven augmentation module generation
     llm: default
+    model: ""
     editor:
       enable: true    # Optional REPLACE/EDIT training hooks generation
       llm: default
+      model: ""
 
   # Idea blueprints agent
   idea_blueprints:
     llm: default
+    model: ""
     top_k: 3
 
   # Optional interactive stage
   interactive:
     enable: false
+    max_steps: 10
+    target_delta: 0.01
 
   # Human-in-the-loop confirmation gates
   hitl:
     confirm: false
     auto_approve: true
+
+  # Personas module (standalone defaults when used outside per-stage blocks)
+  personas:
+    llm: default
+    model: ""
+
+  # Find papers stage (Elsevier)
+  find_papers:
+    # If empty, the system uses project.goal as the base query.
+    query: ""
+    page_size: 25
+    allowed_years: ["2024", "2025"]
+    download_oa_only: true
+    max_kept: 40
+    backup: arxiv          # fallback: if Elsevier errors OR keeps 0 papers -> arXiv. Values: none | arxiv
+    # Goal-driven expansion (appended to the base query)
+    expand:
+      include_terms: []    # e.g., ["dataset", "benchmark", "systematic review"]
+      synonyms: []         # e.g., ["few-shot learning", "meta-learning"]
+    relevance:
+      enable: false        # when false, downloads without LLM relevance gating
+    llm_query:
+      enable: true         # have the model generate additional concise queries from project.goal
+      count: 4
+      max_len: 120
+    provider: arxiv        # auto | elsevier | arxiv — decide once at start; no per-query retries
+    arxiv:
+      categories: ["cs.CV", "eess.IV"]  # restrict to computer vision and image/video (optional)
+      max_results_per_query: 10
+    # Deterministic keyword-driven queries (recommended)
+    keywords: []           # optional explicit keywords; when empty, derived from goal + include_terms + synonyms
+    keyword_query:
+      enable: true
+      terms_per_query: 1
+      max_queries: 5
+      fields: ["ti", "abs"]  # which arXiv fields to search per term
+      simple: true              # when true, use plain keyword terms (no boolean/fields) for arXiv queries
+
+# Tier‑1 validator (optional)
+tier1:
+  enable: false
+
+# PDF extraction backend (planned)
+pdf:
+  backend: pypdf           # pypdf | pymupdf
+  ocr: false               # planned: OCR when needed

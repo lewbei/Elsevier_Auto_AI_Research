@@ -78,6 +78,7 @@ def main() -> None:
     session = DATA / "orchestrator_session.jsonl"
     notes_dir = DATA / "phase_notes"
     steps = int(get("pipeline.orchestrator.phase_steps", 2) or 2)
+    stage_time: dict[str, float] = {}
 
     def log(role: str, content: Any) -> None:
         line = json.dumps({"ts": _now(), "role": role, "content": content}, ensure_ascii=False)
@@ -90,7 +91,9 @@ def main() -> None:
         if notes:
             log("find_papers_notes", notes)
             _write_text(notes_dir / "find_papers.txt", "\n\n".join(notes))
+        t0 = time.time()
         _run_mod("agents.paper_finder")
+        stage_time["find_papers"] = time.time() - t0
     else:
         print("[ORCH] Skipping paper_finder per config/env")
 
@@ -144,6 +147,7 @@ def main() -> None:
                 os.environ.pop("LLM_STREAM", None)
             try:
                 if not locals().get("summaries_up_to_date", False):
+                    t0 = time.time()
                     process_pdfs(
                 pdf_dir=str(pdf_dir),
                 out_dir=str(sum_dir),
@@ -157,6 +161,7 @@ def main() -> None:
                 verbose=bool(get("pipeline.summarize.progress", True) or get("pipeline.summarize.detail", False)),
                 skip_existing=skip_existing,
                     )
+                    stage_time["summaries"] = time.time() - t0
                 else:
                     print("[ORCH] Summaries step skipped: all PDFs already summarized.")
             finally:
@@ -182,7 +187,9 @@ def main() -> None:
         except Exception:
             nov_stream = False
         env = {"LLM_STREAM": "1"} if nov_stream else {}
+        t0 = time.time()
         _run_mod("agents.novelty", env_overrides=env)
+        stage_time["novelty"] = time.time() - t0
     else:
         print("[ORCH] Skipping novelty per config/env")
 
@@ -192,7 +199,9 @@ def main() -> None:
         if notes:
             log("plan_notes", notes)
             _write_text(notes_dir / "plan.txt", "\n\n".join(notes))
+        t0 = time.time()
         _run_mod("agents.planner")
+        stage_time["planner"] = time.time() - t0
     else:
         print("[ORCH] Skipping planner per config/env")
 
@@ -209,7 +218,9 @@ def main() -> None:
         if notes:
             log("interactive_notes", notes)
             _write_text(notes_dir / "interactive.txt", "\n\n".join(notes))
+        t0 = time.time()
         _run_mod("agents.interactive")
+        stage_time["interactive"] = time.time() - t0
 
     # Phase: run (iterate)
     if not (get_bool("pipeline.skip.iterate", False) or (str(os.getenv("SKIP_ITERATE", "")).lower() in {"1", "true", "yes"})):
@@ -217,7 +228,9 @@ def main() -> None:
         if notes:
             log("iterate_notes", notes)
             _write_text(notes_dir / "iterate.txt", "\n\n".join(notes))
+        t0 = time.time()
         _run_mod("agents.iterate")
+        stage_time["iterate"] = time.time() - t0
     else:
         print("[ORCH] Skipping iterate per config/env")
 
@@ -238,9 +251,30 @@ def main() -> None:
         if notes:
             log("report_notes", notes)
             _write_text(notes_dir / "report.txt", "\n\n".join(notes))
+        t0 = time.time()
         _run_mod("agents.write_paper")
+        stage_time["write_paper"] = time.time() - t0
 
     print("[ORCH] Done")
+
+    # Persist simple stage latency metrics and a minimal HTML view
+    try:
+        import json as _json
+        lat_path = RUNS / "stage_latency.json"
+        lat_path.write_text(_json.dumps(stage_time, indent=2), encoding="utf-8")
+        html = [
+            "<html><head><meta charset='utf-8'><title>Stage Latency</title>",
+            "<style>body{font-family:system-ui,Segoe UI,Arial} table{border-collapse:collapse} td,th{border:1px solid #ddd;padding:8px} th{text-align:left;background:#f5f5f5}</style>",
+            "</head><body>",
+            "<h1>Stage Latency</h1>",
+            "<table><thead><tr><th>Stage</th><th>Seconds</th></tr></thead><tbody>",
+        ]
+        for k, v in stage_time.items():
+            html.append(f"<tr><td>{k}</td><td>{v:.3f}</td></tr>")
+        html += ["</tbody></table>", "</body></html>"]
+        (RUNS / "stage_latency.html").write_text("\n".join(html), encoding="utf-8")
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":

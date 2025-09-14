@@ -1,141 +1,136 @@
 # Draft: Compact Research Report
 
 ## Abstract
-This compact probe evaluates Scale-Selective Spectral Attention (SSSA) integrated into an EfficientNet-B0 backbone with a lightweight FPN for skin lesion classification under strict compute limits (≤1 epoch or ≤100 gradient steps). The approach uses 8×8 DCT blocks per FPN scale, aggregates coefficients into three spectral bands, projects each band to channel space and learns per-band×channel scalar gates (init = 1.0, L1 λ = 1e-4). Experiments target ISIC2018 Task3 (stratified small probe subset at /data/ISIC2018/) with batch_size = 8, img_size = 384, lr = 3e-4 and seeds {0,1,2}. Provided run records contain placeholder val_accuracy = 0.0 and test_accuracy = 0.0 for listed runs. Key validation metrics specified in the plan (ROC AUC, small-lesion recall) are TBD pending execution of the constrained probe runs.
+This report outlines a compact, compute-constrained approach to human pose classification using few-shot deep learning. We propose a lightweight episodic training pipeline based on metric learning (prototype-based classification) intended to run within a single epoch of training. Method, training objective, experimental setup, and practical considerations are described so the study can be reproduced under tight resource limits. Quantitative results are TBD.
 
-## 1. Introduction
+## Introduction
 
 ### Executive Introduction
-Automated skin lesion classification can assist clinicians by prioritizing suspicious images for review. Under tight compute budgets, compact architectural interventions that selectively emphasize informative spectral content at multiple scales are attractive because they aim to improve small-lesion sensitivity without large parameter increases.
+Human pose classification (assigning a discrete label to a pose instance) is useful in activity recognition, human–computer interaction, and content moderation. Few-shot learning is a pragmatic approach when annotated pose examples per class are scarce. Under tight compute budgets, we prioritize simple, stable primitives (lightweight embedding networks, prototype-based classifiers, basic augmentations) and an episodic training regime that can run in one epoch or less.
 
 ### Problem Statement
-Design and evaluate a low-overhead spectral attention module (SSSA) that can be inserted into an EfficientNet-B0 + lightweight FPN pipeline to improve validation ROC AUC and recall on small lesions within a strict probe budget (≤1 epoch or ≤100 gradient steps per run), ensuring the added capacity is accounted for by a parameter-matched control.
+Given a small number of labeled pose examples per class, learn an embedding and a classifier that generalizes to novel pose instances with minimal training. The compute constraint requires limiting training to a single epoch and using a small number of steps/episodes.
 
 ### Objectives
-- Implement and probe SSSA integrated into EfficientNet-B0+FPN under the stated compute constraints and seeds {0,1,2}.
-- Compare SSSA against (A) the baseline EfficientNet-B0+FPN and (B) a parameter-matched channel-attention control using the same budget and logging.
+- Design a minimal, reproducible pipeline for few-shot human pose classification that fits within a single training epoch and low compute.
+- Define a clear training objective and evaluation protocol suitable for small-shot regimes and constrained training.
 
 ### Research Question
-Does inserting Scale-Selective Spectral Attention (SSSA) into each FPN scale produce measurable improvements in validation ROC AUC and small-lesion recall over a parameter-matched baseline within the constrained probe budget?
+Can a lightweight prototype-based few-shot pipeline produce useful pose classification behavior when trained within a single epoch under constrained compute?
 
 ### Contributions
-- Specification and probe plan for SSSA: a spectral-band gating module (DCT 8×8 → 3 bands → 1×1 projections → per-band×channel scalars) with initialization and L1 regularization to avoid collapse.
-- A constrained, reproducible experimental protocol (dataset path, seeds, optimizer and stopping rules) designed for cheap falsification runs (≤100 steps / ≤1 epoch).
+- A compact methodology combining a small embedding network, prototype computation, and a cross-entropy training objective formulated for episodic few-shot learning, with equations and implementation-level decisions described.
+- A constrained experimental recipe (datasets, splits, metrics, and budget) intended to be reproducible under the stated compute limits. Quantitative results are reported as TBD pending runs.
 
-## 2. Literature Review
-Relevant themes and prior approaches that motivate this probe include:
+## Literature Review
+Under tight compute, metric-based few-shot methods (prototype/prototypical-style approaches) are attractive because they require only a small classifier head and rely on distance comparisons in embedding space rather than large fully connected classifiers. Typical alternatives include fine-tuning pre-trained backbones and meta-learning optimizers; however, fine-tuning is often compute-heavy and meta-optimizers can be unstable with minimal data and training. Prototype-based methods trade some expressive power for simplicity and stability, making them an appropriate baseline for constrained experiments.
 
-- Use of pretrained CNN backbones and transfer learning for skin lesion classification; common concerns include dataset merging and class imbalance handling.
-- Metaheuristic or hybrid optimization approaches that add search cost and often lack parameter-matched baselines.
-- Detection and localization methods that address small-lesion handling via higher resolution or tailored anchors.
-- Explainability and heatmap evaluation methods (e.g., Grad-CAM variants) and the lack of reproducible sufficiency-focused benchmarks.
+Key comparative points:
+- Prototype-based metric learning: simple prototype computation; episodic training aligns with few-shot evaluation.
+- Fine-tuning baselines: potentially stronger but more compute-intensive and prone to overfitting with very few examples.
+- Meta-learning optimizers (MAML-like): powerful for adaptation but generally require many meta-training iterations, which conflicts with the single-epoch constraint.
 
-This probe is positioned to (A) add a compact spectral module (SSSA) targeting small-lesion sensitivity and (B) follow a constrained experimental protocol with a parameter-matched control, addressing gaps in compute-aware probes and careful controls.
+## Methodology
+We adopt an episodic prototype-based few-shot setup with a lightweight embedding network $f_\theta(\cdot)$. Each training episode samples a small support set $S$ and query set $Q$.
 
-## 3. Methodology
-Overview: integrate SSSA into each FPN scale of an EfficientNet-B0 (ImageNet pretrained) encoder. Keep lateral projections and fusion identical across baseline and ablations; the control is a parameter-matched channel-attention module.
+Model components:
+- Embedding network $f_\theta$: a compact CNN or lightweight backbone; architecture and width = TBD.
+- Prototype computation per class $k$:
+$$
+c_k = \frac{1}{|S_k|} \sum_{(x,y)\in S_k} f_\theta(x),
+$$
+where $S_k$ is the support set for class $k$.
+- Distance metric: squared Euclidean distance
+$$
+d(z, c_k) = \| z - c_k \|_2^2.
+$$
+- Predictive distribution for query $x$:
+$$
+p(y=k \mid x) = \frac{\exp\big(-d(f_\theta(x), c_k)\big)}{\sum_{j}\exp\big(-d(f_\theta(x), c_j)\big)}.
+$$
 
-SSSA module (specification from plan):
-- For each FPN scale feature map F with shape C × H × W:
-  - Compute non-overlapping 8×8 2D DCT blocks aligned to the scale's receptive regions (dct_block = 8).
-  - Aggregate DCT coefficients into three bands: low (first 6 coefficients), mid (next 12 coefficients), high (remaining coefficients up to the block total).
-  - For each band b in {low, mid, high}: apply a 1×1 convolution that maps the band summary to C channels, producing a per-channel scalar gate vector g_b of length C.
-  - Combine bands and modulate F by a learned gate: F' = F ⊙ (1 + G), where G = sum_b g_b expanded/broadcast to H × W. Gates are initialized to 1.0.
-- Per-band×channel scalar L1 regularization applied with λ = 1e-4 to discourage collapse to zero.
+Training objective:
+- Use cross-entropy (CE) loss on query examples within episodes. For a query $x$ with ground-truth class $y$:
+$$
+\mathcal{L}_{\text{CE}}(x) = -\log p(y \mid x).
+$$
+- Episode loss is the average CE over queries in the episode:
+$$
+\mathcal{L}_{\text{episode}} = \frac{1}{|Q|} \sum_{x\in Q} \mathcal{L}_{\text{CE}}(x).
+$$
 
-Training objective
-- Binary classification loss: use binary cross-entropy (BCE). For a batch of N examples with labels y_i ∈ {0,1} and logits s_i:
-  - L_BCE = -(1/N) * sum_i [ y_i * log(sigmoid(s_i)) + (1 - y_i) * log(1 - sigmoid(s_i)) ].
-- Gate regularization:
-  - L_gate = λ * sum_b ||g_b||_1, with λ = 1e-4.
-- Total loss:
-  - L = L_BCE + L_gate.
+Regularization and practical choices:
+- Feature normalization (e.g., L2 normalization of embeddings) is optional; if used, apply after $f_\theta$ and before prototype computation.
+- Simple augmentations: small geometric transforms and mild photometric jitter; exact parameters = TBD.
+- Optimization: a single optimizer (e.g., SGD or Adam) with learning rate schedule = TBD; training runs limited to one epoch or less.
 
-Notes on control and initialization:
-- The parameter-matched channel-attention control uses per-scale scalar vectors with similar total parameter count (±2%) and the same L1 λ and init = 1.0 to isolate spectral specificity versus capacity.
-- If gate collapse is observed, mitigations include freezing gates for the first 10 steps or increasing gate initialization (e.g., to 1.1).
+Implementation notes for reproducibility:
+- Episodes correspond to N-way K-shot tasks; exact N and K values = TBD.
+- Record random seed and all hyperparameters explicitly during runs (seed = TBD).
 
-Implementation-level constraints:
-- Keep SSSA extra parameters ≤10% of baseline.
-- Image input size = 384, batch_size = 8.
-- Optimizer settings are in the Experimental Setup.
+## Experimental Setup
+Datasets and splits:
+- Dataset(s) for human pose classification: dataset identifiers and paths = TBD.
+- Splits: define training classes (base), validation classes (val), and test classes (novel). Exact split lists and sizes = TBD.
 
-## 4. Experimental Setup
-Dataset and paths
-- Dataset: ISIC2018 Task3 (stratified small probe subset).
-- Path: /data/ISIC2018/
-- Splits: TBD (train/val/test split specifics to be set; ensure stratification for small lesions).
+Evaluation metrics:
+- Primary metric: accuracy (top-1) on query sets for episodic evaluation.
+- Secondary metrics: precision, recall, and class-wise breakdowns as available.
+- Report per-episode mean and standard deviation across evaluation episodes.
 
-Hyperparameters and budget
-- Backbone: EfficientNet-B0 (ImageNet pretrained).
-- FPN: lightweight lateral projection to 128 channels for C3/C4/C5 (identical across conditions).
-- img_size = 384, batch_size = 8.
-- Learning rate = 3e-4, warmup_steps = 10.
-- Max steps per run: 100 OR max_epochs = 1 (hard stop, whichever occurs first).
-- Seeds: {0,1,2}.
-- Stopping/abort rules: abort on NaN/Inf loss, zero gradient norm for 5 consecutive steps, or OOM; save debug artifacts on abort.
+Training budget and constraints:
+- Total training budget: at most one epoch over the provided training split (strict).
+- Number of episodes per epoch, batch/episode size, and step counts = TBD (choose small values consistent with compute limits).
+- Random seed(s): record explicitly (seed = TBD).
+- Hardware: run on a low-resource device; device details = TBD.
 
-Baselines and ablations
-- Baseline: EfficientNet-B0 + lightweight FPN (no SSSA).
-- Control: EfficientNet-B0 + FPN + parameter-matched channel-attention.
-- Novelty: EfficientNet-B0 + FPN + SSSA.
+Ablations and baselines:
+- Baseline: prototype method with no augmentation.
+- Ablations: with/without augmentation; with/without feature normalization.
+- Additional baseline options (if compute allows): nearest-centroid in raw feature space, or a linear classifier trained on frozen embeddings (TBD).
 
-Metrics
-- Primary: ROC AUC (validation).
-- Secondary: small-lesion recall (lesions with max dimension ≤64 px at img_size = 384, validation).
-- Additional: val_accuracy, test_accuracy (provided in run records as 0.0 placeholders).
-- Seeds and statistical test plan: compare mean deltas across seeds; use nonparametric tests where appropriate.
+Logging and checkpoints:
+- Save checkpoints at small intervals or only the final model to conserve storage; checkpoint frequency = TBD.
+- Record training loss curves, validation episodic accuracy, and sample qualitative visualizations of nearest-prototype assignments.
 
-Runs (provided run records)
-- A list of experimental run names was provided with val_accuracy and test_accuracy values (all listed as 0.0). These placeholders are reported in Results exactly as given.
+## Results
+Quantitative results (validation/test metrics): TBD.
 
-Compute and logging
-- Hardware: TBD.
-- Logging: per-step loss, gate norms, validation metrics at checkpoint intervals; store runs under /runs/{exp}/{cond}/{seed}/.
-- Hard resource constraint: no run to exceed 100 gradient steps.
+Report format to be produced when runs complete:
+- Table of episodic accuracy (mean ± std) for each evaluated configuration (baseline and ablations).
+- Per-class accuracy breakdown if available.
+- Training loss curve across the single epoch (per-episode losses).
+- Qualitative examples showing nearest-prototype assignment for selected queries.
 
-## 5. Results
-Reported run metrics (as provided). Values are reported exactly as given (placeholders present in input):
+Notes:
+- No numerical claims are made here because experimental runs and reported metrics are pending (TBD).
+- The report will adhere to the single-epoch constraint and will present raw metrics without smoothing or extrapolation.
 
-- baseline: val_accuracy = 0.0, test_accuracy = 0.0
-- baseline_mbv3: val_accuracy = 0.0, test_accuracy = 0.0
-- novelty: val_accuracy = 0.0, test_accuracy = 0.0
-- novelty_mbv3: val_accuracy = 0.0, test_accuracy = 0.0
-- ablation: val_accuracy = 0.0, test_accuracy = 0.0
-- ablation_mbv3: val_accuracy = 0.0, test_accuracy = 0.0
-- novelty_lr_up: val_accuracy = 0.0, test_accuracy = 0.0
-- novelty_inp_up: val_accuracy = 0.0, test_accuracy = 0.0
-- novelty_sgd: val_accuracy = 0.0, test_accuracy = 0.0
-- novelty_dropout_high: val_accuracy = 0.0, test_accuracy = 0.0
+## Discussion
+Under the one-epoch constraint, prototype-based methods are desirable because they require learning embeddings that generalize by clustering support examples into class centroids rather than training a large classifier head. Expected behaviors and trade-offs:
+- Pros: simplicity, low parameter overhead for the classifier, and stable episodic alignment to few-shot evaluation.
+- Cons: limited optimization time likely leads to underfitting; embedding capacity must balance expressiveness and overfitting risk given few updates.
+- Augmentation and normalization are low-cost interventions that can improve robustness with little compute overhead.
+- Evaluation with few episodes and small K-shot tasks produces high variance; report mean and standard deviation over as many episodes as allowed by compute.
 
-Other requested target metrics (ROC AUC, small-lesion recall) are not supplied in the provided run records and are therefore TBD.
+Practical recommendations:
+- Prefer small, well-regularized embeddings over deep models when compute-limited.
+- Use episode design that matches expected deployment N-way/K-shot conditions.
+- Record seeds and hyperparameters so single-epoch stochasticity can be analyzed reproducibly.
 
-Notes
-- The provided run records appear to be placeholders. No numerical ROC AUC, small-lesion recall, or seed-wise performance numbers were provided; therefore statistical comparisons against the success criteria cannot be computed from the supplied data.
+## Conclusion
+This compact report defines a reproducible, compute-constrained methodology for few-shot human pose classification using prototype-based metric learning and a cross-entropy training objective formulated over episode queries. The experimental recipe and evaluation protocol are specified to operate within a single epoch; quantitative results remain TBD pending runs.
 
-## 6. Discussion
-- Status: The plan, model specification, loss formulation, and constrained experimental protocol are fully specified. Provided run records contain placeholder accuracy values (0.0) and do not include the primary metrics required to judge hypotheses (ROC AUC, small-lesion recall). As a result, claims about SSSA performance relative to baseline/control are not supported by supplied numeric evidence.
-- Practical interpretation under tight compute: the design emphasizes a low-overhead, testable spectral module (SSSA) with explicit falsification criteria and a parameter-matched control. This enforces parameter matching and limited steps to enable cheap, reproducible probes.
-- Failure modes to monitor during runs: gate collapse (all gates → 0), NaN losses, zero gradients; mitigations are included in methodology and stopping rules.
-- Reproducibility: seeds {0,1,2}, hard step cap (100), dataset path, and optimizer hyperparameters are provided to ensure runs are reproducible within the same compute constraints.
+## Future Work
+- Run the specified experiments and populate the Results section with per-configuration quantitative metrics.
+- Explore lightweight pretraining of the embedding (if allowed within compute constraints) to improve initial representations before episodic training.
+- Investigate curriculum strategies for episode sampling that prioritize informative classes or hard negatives within the limited budget.
 
-## 7. Conclusion
-This compact report specifies SSSA and a constrained experimental protocol for a cheap, falsifiable probe of spectral attention for skin lesion classification. The implementation details (DCT block sizes, band splits, gate initialization, L1 regularization), the loss formulation, and strict stopping rules are provided. Provided run records are placeholders (val_accuracy/test_accuracy = 0.0); definitive evaluation on the stated target metrics (ROC AUC and small-lesion recall) remains TBD pending execution of the constrained runs.
+## Limitations
+- No quantitative results are reported here; all numeric experiment items are marked as TBD until runs are executed.
+- The single-epoch constraint restricts optimization and may understate model potential compared to standard multi-epoch training.
+- Dataset-specific choices and hyperparameters are left as TBD; exact reproducibility requires filling these fields before running experiments.
+- No external citations or prior-run numbers are included.
 
-## 8. Future Work
-- Execute the planned probe runs (baseline, control, SSSA) for seeds {0,1,2} under the 100-step cap and report ROC AUC and small-lesion recall.
-- If gate collapse or unstable training occurs, apply mitigations: freeze gates for first 10 steps or increase gate init to 1.1 and re-run.
-- Budget-permitting ablations:
-  - Parameter-matched spatial channel-attention control (already planned).
-  - Remove one band (e.g., test low+mid only) to test band importance.
-  - Test alternative regularizers (e.g., L2) only if budget permits.
-- Expand the small-lesion evaluation to explicit IoU or localization recall if segmentation/crops are available.
-
-## 9. Limitations
-- Compute and probe budget: experiments are limited to ≤1 epoch or ≤100 gradient steps; results will be preliminary and may not reflect full convergence behavior.
-- Dataset/split details: train/val/test split specifications are TBD; without precise splits, reported metrics may not be comparable.
-- Provided runs currently contain placeholder metrics (0.0) and do not include ROC AUC or small-lesion recall; substantive claims cannot be made until these metrics are produced.
-- No external citations or additional datasets were introduced; this report relies only on supplied inputs.
-
-## 10. References
+## References
 None provided.
