@@ -365,15 +365,43 @@ def main() -> None:
         _run_mod("agents.interactive")
         stage_time["interactive"] = time.time() - t0
 
-    # Phase: run (iterate)
+    # Phase: run (iterate) — supports per-blueprint multi-plan mode
     if not (get_bool("pipeline.skip.iterate", False) or (str(os.getenv("SKIP_ITERATE", "")).lower() in {"1", "true", "yes"})):
-        notes = _persona_phase_notes("run_iterate", {}, steps)
-        if notes:
-            log("iterate_notes", notes)
-            _write_text(notes_dir / "iterate.txt", "\n\n".join(notes))
-        t0 = time.time()
-        _run_mod("agents.iterate")
-        stage_time["iterate"] = time.time() - t0
+        multi = get_bool("pipeline.planner.plan_each_blueprint", False) or (str(os.getenv("PLAN_EACH_BLUEPRINT", "")).lower() in {"1", "true", "yes"})
+        plans_dir = DATA / "plans"
+        plan_files: List[Path] = []
+        if multi and plans_dir.exists():
+            try:
+                plan_files = sorted(plans_dir.glob("plan_*.json"), key=lambda p: p.name)
+            except Exception:
+                plan_files = []
+        if multi and plan_files:
+            print(f"[ORCH] Multi-plan iterate enabled: {len(plan_files)} plans found")
+            for idx, pfile in enumerate(plan_files, start=1):
+                try:
+                    # Overwrite data/plan.json with this plan for downstream consumption
+                    plan_json = pfile.read_text(encoding="utf-8")
+                    (DATA / "plan.json").write_text(plan_json, encoding="utf-8")
+                except Exception as exc:
+                    print(f"[ORCH] Failed to set active plan from {pfile}: {exc}")
+                    continue
+                notes = _persona_phase_notes("run_iterate", {"plan_file": str(pfile.name)}, steps)
+                if notes:
+                    log("iterate_notes", notes)
+                    _write_text(notes_dir / f"iterate_{idx}.txt", "\n\n".join(notes))
+                t0 = time.time()
+                # Optionally tag the stage with plan index
+                env = {"LLM_STAGE": f"iterate_{idx}"}
+                _run_mod("agents.iterate", env_overrides=env)
+                stage_time[f"iterate_{idx}"] = time.time() - t0
+        else:
+            notes = _persona_phase_notes("run_iterate", {}, steps)
+            if notes:
+                log("iterate_notes", notes)
+                _write_text(notes_dir / "iterate.txt", "\n\n".join(notes))
+            t0 = time.time()
+            _run_mod("agents.iterate")
+            stage_time["iterate"] = time.time() - t0
     else:
         print("[ORCH] Skipping iterate per config/env")
 

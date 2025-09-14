@@ -24,10 +24,13 @@ except Exception:
 DATA_DIR = pathlib.Path("data")
 REPORT_PATH = DATA_DIR / "novelty_report.json"
 PLAN_PATH = DATA_DIR / "plan.json"
+IDEAS_DIR = DATA_DIR / "ideas"
+BLUEPRINTS_PATH = IDEAS_DIR / "blueprints.json"
 
 
 def _ensure_dirs() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    (DATA_DIR / "plans").mkdir(parents=True, exist_ok=True)
 
 # Optional dependency: jsonschema for strict validation
 try:
@@ -542,13 +545,43 @@ def _pick_candidates(novelty: Dict[str, Any], k: int = 3) -> list[Dict[str, Any]
     return cands
 
 
-def build_plan(novelty: Dict[str, Any]) -> Dict[str, Any]:
+def _candidates_from_blueprints(path: pathlib.Path) -> list[Dict[str, Any]]:
+    """Convert data/ideas/blueprints.json into planner candidates.
+
+    Expected shape: {"blueprints": [ { idea, methodology: {novelty_kind, spec_hint, baselines, ablations, datasets, metrics}, ... }, ... ]}
+    """
+    try:
+        js = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    bps = js.get("blueprints") or []
+    out: list[Dict[str, Any]] = []
+    for i, bp in enumerate(bps, start=1):
+        if not isinstance(bp, dict):
+            continue
+        m = bp.get("methodology") or {}
+        cand = {
+            "id": str(i),
+            "title": str(bp.get("idea") or "").strip(),
+            "novelty_kind": str(m.get("novelty_kind") or "").strip(),
+            "spec_hint": str(m.get("spec_hint") or "").strip(),
+            "baselines": [str(x).strip() for x in (m.get("baselines") or []) if str(x).strip()],
+            "ablations": [str(x).strip() for x in (m.get("ablations") or []) if str(x).strip()],
+            "datasets": [str(x).strip() for x in (m.get("datasets") or []) if str(x).strip()],
+            "metrics": [str(x).strip() for x in (m.get("metrics") or []) if str(x).strip()],
+        }
+        if cand["title"]:
+            out.append(cand)
+    return out
+
+
+def build_plan(novelty: Dict[str, Any], *, candidates_override: Optional[list[Dict[str, Any]]] = None) -> Dict[str, Any]:
     """Ask the LLM to turn the novelty report into a compact, actionable plan.
     The plan is intentionally small so it is cheap and deterministic.
     """
     topic = str(get("project.goal", "your task") or "your task")
     outline = _extract_outline(novelty)
-    candidates = _pick_candidates(novelty, k=3)
+    candidates = list(candidates_override) if candidates_override else _pick_candidates(novelty, k=3)
     system = (
         "You are a Principal Investigator preparing an actionable, resource-aware research plan from a novelty report.\n"
         f"Target: iterative experiment loop for {topic}.\n"
@@ -1069,7 +1102,7 @@ def main() -> None:
             print(f"[PLANNER] Novelty report: themes={themes}, ideas={ideas}, research_q={rq}")
         except Exception:
             pass
-        plan = run_planning_session(novelty)
+    plan = run_planning_session(novelty)
     except Exception as exc:
         print(f"[ERR] Planning session failed without fallback: {exc}")
         return
@@ -1083,6 +1116,31 @@ def main() -> None:
         print(f"[PENDING] Plan written to {pending}. Set HITL_AUTO_APPROVE=1 to finalize.")
         return
 
+    # Optional: generate a plan per blueprint when enabled
+    multi = get_bool("pipeline.planner.plan_each_blueprint", False) or (str(os.getenv("PLAN_EACH_BLUEPRINT", "")).lower() in {"1", "true", "yes"})
+    if multi and BLUEPRINTS_PATH.exists():
+        try:
+            bpc = _candidates_from_blueprints(BLUEPRINTS_PATH)
+        except Exception:
+            bpc = []
+        if bpc:
+            plans_dir = DATA_DIR / "plans"
+            wrote_any = False
+            for idx, cand in enumerate(bpc, start=1):
+                try:
+                    p = build_plan(novelty, candidates_override=[cand])
+                    out_path = plans_dir / f"plan_{idx}.json"
+                    atomic_write_json(out_path, p)
+                    print(f"[DONE] Wrote plan for blueprint {idx} to {out_path}")
+                    # For the first plan, also update plan.json for downstream tools
+                    if idx == 1:
+                        atomic_write_json(PLAN_PATH, p)
+                    wrote_any = True
+                except Exception as exc:
+                    print(f"[ERR] Failed to build/write plan for blueprint {idx}: {exc}")
+            if wrote_any:
+                return
+    # Default single-plan behavior
     try:
         atomic_write_json(PLAN_PATH, plan)
     except Exception as exc:

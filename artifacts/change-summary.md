@@ -27,3 +27,10 @@
   - `agents/write_paper.py` (LLM path): Removed the "What/Why/How" Introduction subsections; Introduction is now cohesive prose. Section order now ends with "Future Work" and explicitly instructs the model to stop there (no References). Page reminder updated accordingly (no "Broader Impact & Ethics").
   - `agents/write_paper.py` (fallback composer): Replaced the "### What/Why/How" blocks with a single introductory paragraph; otherwise unchanged.
   - Markdown sanitizer now truncates any content after the "## Future Work" section to prevent trailing sections or accidental duplication.
+  - Upgraded LaTeX output: full sanitized Markdown is rendered to `paper/main.tex` (headings, paragraphs, math) via a minimal converter; still stops at "Future Work".
+  - Literature review gap: Related Work ends with a `### Research Gap` subsection; prompt and reminder updated to require this.
+  - Formal tone + explicit intro sentences: enforced formal tone (no hype) and explicit sentences in Introduction: “The first objective is…”, “The second objective is…”, “The research question is…”, “The first contribution is…”, “The second contribution is…”. Post-pass ensures these exist.
+
+- Planner enhancements:
+  - Added blueprint-first multi-plan mode. When `pipeline.planner.plan_each_blueprint: true` and `data/ideas/blueprints.json` exists, the planner generates one plan per blueprint to `data/plans/plan_1.json`, `plan_2.json`, … and updates `data/plan.json` with the first plan for downstream stages. Falls back to single-plan behavior otherwise.
+  - No change to orchestrator flow yet; iterate still consumes `data/plan.json`. Optionally, we can add an iterate-per-plan loop next.
