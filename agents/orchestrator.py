@@ -80,6 +80,121 @@ def main() -> None:
     steps = int(get("pipeline.orchestrator.phase_steps", 2) or 2)
     stage_time: dict[str, float] = {}
 
+    # Embeddings config snapshot (used for prefetch/force summaries)
+    try:
+        emb_enable = bool(get("embeddings.enable", False))
+    except Exception:
+        emb_enable = False
+    try:
+        ret_enable = bool(get("embeddings.retrieval.enable", False))
+    except Exception:
+        ret_enable = False
+    try:
+        emb_provider = str(get("embeddings.provider", "huggingface") or "huggingface").strip().lower()
+    except Exception:
+        emb_provider = "huggingface"
+    try:
+        emb_model = str(get("embeddings.model", "") or "").strip()
+    except Exception:
+        emb_model = ""
+
+    def _safe_model_dir_name(model_name: str) -> str:
+        s = str(model_name).strip().replace("/", "-").replace(":", "-")
+        s = "".join(ch for ch in s if ch.isalnum() or ch in {"-", "_", "."})
+        return s or "model"
+
+    def _vectors_exist() -> bool:
+        if not emb_model:
+            return False
+        root = HERE / "data" / "embeddings" / _safe_model_dir_name(emb_model)
+        if not root.exists():
+            return False
+        try:
+            # Any .npy vector file indicates prior embedding run
+            return any(root.rglob("*.npy"))
+        except Exception:
+            return False
+
+    def _prefetch_embeddings_model() -> None:
+        if not (emb_enable and emb_provider == "huggingface" and emb_model):
+            return
+        try:
+            print(f"[ORCH] Prefetch embeddings model: {emb_model}")
+        except Exception:
+            pass
+        try:
+            from transformers import AutoTokenizer, AutoModel  # type: ignore
+            _ = AutoTokenizer.from_pretrained(emb_model)
+            _ = AutoModel.from_pretrained(emb_model)
+            try:
+                print(f"[ORCH] Prefetch OK: {emb_model}")
+            except Exception:
+                pass
+        except Exception as exc:
+            # Do not fail the run here; the summarize stage will surface detailed errors
+            try:
+                print(f"[ORCH] Prefetch failed for embeddings model '{emb_model}': {exc}")
+            except Exception:
+                pass
+
+    def _backfill_vectors_from_summaries() -> None:
+        """Generate embedding vectors from existing summary JSONs when no vectors exist.
+
+        Uses utils.embeddings.compute_summary_text + embed_and_store with
+        config-driven provider/model settings. Requires GPU as per embedding policy.
+        """
+        if not (emb_enable and ret_enable and emb_model):
+            return
+        from pathlib import Path as _P
+        sum_dir = HERE / "data" / "summaries"
+        if not sum_dir.exists():
+            return
+        try:
+            from lab.config import get as _get
+            provider = str(_get("embeddings.provider", "huggingface") or "huggingface").strip().lower()
+            model_name = str(_get("embeddings.model", emb_model) or emb_model)
+            dtype = str(_get("embeddings.dtype", "float16") or "float16")
+            bs = int(_get("embeddings.batch_size", 2) or 2)
+            max_len = int(_get("embeddings.max_length", 1024) or 1024)
+        except Exception:
+            provider, model_name, dtype, bs, max_len = "huggingface", emb_model, "float16", 2, 1024
+        try:
+            print("[ORCH] Backfill embeddings from summaries …")
+        except Exception:
+            pass
+        try:
+            import json as _json
+            from utils.embeddings import embed_and_store, compute_summary_text
+            n = 0
+            for p in sorted(sum_dir.glob("*.json")):
+                try:
+                    rec = _json.loads(p.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                summ = rec.get("summary") or {}
+                if not isinstance(summ, dict):
+                    continue
+                st = compute_summary_text(summ)
+                key = p.stem + "_summary"
+                try:
+                    _ = embed_and_store(key, st, provider=provider, model=model_name, batch_size=bs, max_length=max_len, dtype=dtype)
+                    n += 1
+                except Exception as exc:
+                    # keep going; failures will surface later if no vectors exist
+                    try:
+                        print(f"[ORCH] Backfill fail for {p.name}: {exc}")
+                    except Exception:
+                        pass
+            try:
+                print(f"[ORCH] Backfill complete. Created {n} vectors (summary_text).")
+            except Exception:
+                pass
+        except Exception as exc:
+            try:
+                print(f"[ORCH] Backfill error: {exc}")
+            except Exception:
+                pass
+
     def log(role: str, content: Any) -> None:
         line = json.dumps({"ts": _now(), "role": role, "content": content}, ensure_ascii=False)
         with session.open("a", encoding="utf-8") as fh:
@@ -98,7 +213,17 @@ def main() -> None:
         print("[ORCH] Skipping paper_finder per config/env")
 
     # Phase: summaries (per-paper)
-    if not (get_bool("pipeline.skip.summaries", False) or ((str(os.getenv("SKIP_SUMMARIES", "")).strip().lower()) in {"1", "true", "yes"})):
+    _skip_cfg = get_bool("pipeline.skip.summaries", False)
+    _skip_env = ((str(os.getenv("SKIP_SUMMARIES", "")).strip().lower()) in {"1", "true", "yes"})
+    _force_summaries = False
+    # If embeddings+retrieval enabled and no vectors exist, force summaries to generate vectors
+    if emb_enable and ret_enable and (not _vectors_exist()):
+        _force_summaries = True
+        try:
+            print("[ORCH] Forcing summaries to generate embeddings (no vectors found).")
+        except Exception:
+            pass
+    if not (_skip_cfg or _skip_env) or _force_summaries:
         notes = _persona_phase_notes("summaries", {}, steps)
         if notes:
             log("summaries_notes", notes)
@@ -108,6 +233,8 @@ def main() -> None:
             from agents.summarize import process_pdfs
             pdf_dir = HERE / "pdfs"
             sum_dir = HERE / "data" / "summaries"
+            # Prefetch embeddings model when enabled to reduce first-run latency/failures
+            _prefetch_embeddings_model()
             # Count PDFs and detect missing summaries by filename
             try:
                 pdfs = sorted([p for p in pdf_dir.glob("*.pdf") if p.is_file()]) if pdf_dir.exists() else []
@@ -172,6 +299,10 @@ def main() -> None:
                     os.environ["LLM_STREAM"] = prev_stream
         except Exception as exc:
             print(f"[ORCH] Summaries failed: {exc}")
+    # If vectors still do not exist but we have summaries, try summary-based backfill
+    if emb_enable and ret_enable and (not _vectors_exist()):
+        _prefetch_embeddings_model()
+        _backfill_vectors_from_summaries()
     else:
         print("[ORCH] Skipping summaries per config/env")
 
@@ -192,6 +323,18 @@ def main() -> None:
         stage_time["novelty"] = time.time() - t0
     else:
         print("[ORCH] Skipping novelty per config/env")
+
+    # Phase: idea_blueprints (expand top ideas into runnable blueprints)
+    if not (get_bool("pipeline.skip.idea_blueprints", False) or (str(os.getenv("SKIP_IDEA_BLUEPRINTS", "")).lower() in {"1", "true", "yes"})):
+        notes = _persona_phase_notes("idea_blueprints", {}, steps)
+        if notes:
+            log("idea_blueprints_notes", notes)
+            _write_text(notes_dir / "idea_blueprints.txt", "\n\n".join(notes))
+        t0 = time.time()
+        _run_mod("agents.idea_blueprints")
+        stage_time["idea_blueprints"] = time.time() - t0
+    else:
+        print("[ORCH] Skipping idea_blueprints per config/env")
 
     # Phase: plan
     if not (get_bool("pipeline.skip.planner", False) or (str(os.getenv("SKIP_PLANNER", "")).lower() in {"1", "true", "yes"})):

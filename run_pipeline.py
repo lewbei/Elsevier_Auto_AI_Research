@@ -95,9 +95,8 @@ def main() -> None:
     except Exception:
         print("[COST] Failed to write LLM usage summary.")
 
-    print("\n[PIPELINE COMPLETE] Outputs:\n- PDFs: pdfs/\n- Summaries: data/summaries/\n- Novelty report: data/novelty_report.json\n- Plan: data/plan.json\n- Runs+reports: runs/\n- Paper draft: paper/ (if WRITE_PAPER=1)\n- LLM cost summary: runs/llm_cost.json")
+    print("\n[PIPELINE COMPLETE] Outputs:\n- PDFs: pdfs/\n- Summaries: data/summaries/\n- Novelty: data/novelty/ (report, transcripts, neighbors, stats)\n- Plan: data/plan.json\n- Runs+reports: runs/\n- Paper draft: paper/ (if WRITE_PAPER=1)\n- LLM cost summary: runs/llm_cost.json")
 
 
 if __name__ == "__main__":
     main()
-

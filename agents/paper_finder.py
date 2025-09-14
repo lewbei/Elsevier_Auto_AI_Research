@@ -601,44 +601,47 @@ if __name__ == "__main__":
                 break
 
     def _run_arxiv(q: str):
+        """Fetch a single-page arXiv Atom query and process entries (download PDFs when relevant)."""
         global processed, kept, downloaded, skip_year, skip_dup, no_abs, prev_kept
         try:
             print(f"[ARXIV] query = {q}")
         except Exception:
             pass
-        ARXIV_BASE = "http://export.arxiv.org/api/query"
-    def _build_arxiv_search(q: str, cats: List[str], simple: bool = False) -> str:
-        q = (q or "").strip()
-        # If simple keyword mode, search across all fields without boolean operators
-        if simple and q:
-            esc = q.replace('"', '')
-            search = f'all:"{esc}"'
-        else:
-            # If user/LLM supplied boolean/fielded query, honor it; else search in title/abstract
-            has_ops = any(tok in q for tok in [" ti:", " abs:", " au:", " cat:", "AND", "OR", "ANDNOT", "(", ")", '"'])
-            if has_ops:
-                search = q
-            else:
-                esc = q.replace('"', "")
-                search = f'(ti:"{esc}" OR abs:"{esc}")'
-        if cats:
-            cat_expr = " OR ".join(f"cat:{c}" for c in cats if c)
-            if cat_expr:
-                search = f'({search}) AND ({cat_expr})'
-        return search
 
-    def _arxiv_query_url(q: str, start: int, max_results: int, cats: List[str], simple: bool) -> str:
-        from urllib.parse import urlencode
-        search = _build_arxiv_search(q, cats, simple=simple)
-        params = {
-            "search_query": search,
-            "start": int(start),
-            "max_results": int(max_results),
-            "sortBy": "submittedDate",
-            "sortOrder": "descending",
-        }
-        return f"{ARXIV_BASE}?{urlencode(params)}"
+        ARXIV_BASE = "http://export.arxiv.org/api/query"
+
+        def _build_arxiv_search(term: str, cats: List[str], simple: bool = False) -> str:
+            term = (term or "").strip()
+            if simple and term:
+                esc = term.replace('"', '')
+                search = f'all:"{esc}"'
+            else:
+                has_ops = any(tok in term for tok in [" ti:", " abs:", " au:", " cat:", "AND", "OR", "ANDNOT", "(", ")", '"'])
+                if has_ops:
+                    search = term
+                else:
+                    esc = term.replace('"', '')
+                    search = f'(ti:"{esc}" OR abs:"{esc}")'
+            if cats:
+                cat_expr = " OR ".join(f"cat:{c}" for c in cats if c)
+                if cat_expr:
+                    search = f'({search}) AND ({cat_expr})'
+            return search
+
+        def _arxiv_query_url(term: str, start: int, max_results: int, cats: List[str], simple: bool) -> str:
+            from urllib.parse import urlencode
+            search = _build_arxiv_search(term, cats, simple=simple)
+            params = {
+                "search_query": search,
+                "start": int(start),
+                "max_results": int(max_results),
+                "sortBy": "submittedDate",
+                "sortOrder": "descending",
+            }
+            return f"{ARXIV_BASE}?{urlencode(params)}"
+
         import xml.etree.ElementTree as ET
+
         start = 0
         try:
             per_query = int(cfg_get("pipeline.find_papers.arxiv.max_results_per_query", 10) or 10)
@@ -653,92 +656,106 @@ if __name__ == "__main__":
             simple_kw = bool(cfg_get("pipeline.find_papers.keyword_query.simple", True))
         except Exception:
             simple_kw = True
-        while True:
-            url = _arxiv_query_url(q, start, page_sz, allow_cats, simple=simple_kw)
-            try:
-                print(f"[ARXIV] page_start={start} url={url}")
-            except Exception:
-                pass
-            r = requests.get(url, timeout=45, headers={"User-Agent": USER_AGENT})
-            if r.status_code != 200:
-                print(f"[ARXIV ERR] {r.status_code}: {r.text[:200]}")
-                break
+
+        url = _arxiv_query_url(q, start, page_sz, allow_cats, simple=simple_kw)
+        try:
+            print(f"[ARXIV] page_start={start} url={url}")
+        except Exception:
+            pass
+
+        r = requests.get(url, timeout=45, headers={"User-Agent": USER_AGENT})
+        if r.status_code != 200:
+            print(f"[ARXIV ERR] {r.status_code}: {r.text[:200]}")
+            return
+
+        try:
             root = ET.fromstring(r.text)
-            ns = {"atom": "http://www.w3.org/2005/Atom"}
-            entries = root.findall("atom:entry", ns)
+        except Exception as exc:
+            print(f"[ARXIV ERR] failed to parse feed: {exc}")
+            return
+        ns = {"atom": "http://www.w3.org/2005/Atom"}
+        entries = root.findall("atom:entry", ns)
+        try:
+            print(f"[ARXIV] fetched entries={len(entries)}")
+        except Exception:
+            pass
+        if not entries:
+            return
+
+        for e in entries:
+            title = (e.findtext("atom:title", default="", namespaces=ns) or "").strip()
+            summary = (e.findtext("atom:summary", default="", namespaces=ns) or "").strip()
+            published = (e.findtext("atom:published", default="", namespaces=ns) or "").strip()
+
+            # Category filter
+            cats = set()
+            for c in e.findall("atom:category", ns):
+                term = c.get("term") or ""
+                if term:
+                    cats.add(term)
+            if allow_cats and cats and not (cats.intersection(set(allow_cats))):
+                continue
+
+            year = (published.split("-", 1)[0] or "").strip()
+            if year and year not in ALLOWED_YEARS:
+                continue
+
+            links = [(ln.get("rel"), ln.get("href"), ln.get("type", "")) for ln in e.findall("atom:link", ns)]
+            pdf = ""
+            for rel, href, typ in links:
+                if (rel == "related" and typ == "application/pdf") or (href and href.endswith(".pdf")):
+                    pdf = href
+                    break
+            if not pdf:
+                entry_id = (e.findtext("atom:id", default="", namespaces=ns) or "").strip()
+                if entry_id and "/abs/" in entry_id:
+                    pdf = entry_id.replace("/abs/", "/pdf/") + ".pdf"
+
+            if not summary:
+                continue
+
             try:
-                print(f"[ARXIV] fetched entries={len(entries)}")
+                rel_enable = bool(cfg_get("pipeline.find_papers.relevance.enable", True))
             except Exception:
-                pass
-            if not entries:
-                break
-            for e in entries:
-                title = (e.findtext("atom:title", default="", namespaces=ns) or "").strip()
-                summary = (e.findtext("atom:summary", default="", namespaces=ns) or "").strip()
-                published = (e.findtext("atom:published", default="", namespaces=ns) or "").strip()
-                # Category filter (configurable; default cs.CV)
-                cats = set()
-                for c in e.findall("atom:category", ns):
-                    term = c.get("term") or ""
-                    if term:
-                        cats.add(term)
-                if allow_cats and cats and not (cats.intersection(set(allow_cats))):
-                    continue
-                year = (published.split("-", 1)[0] or "").strip()
-                if year and year not in ALLOWED_YEARS:
-                    continue
-                links = [(ln.get("rel"), ln.get("href"), ln.get("type", "")) for ln in e.findall("atom:link", ns)]
-                pdf = ""
-                for rel, href, typ in links:
-                    if (rel == "related" and typ == "application/pdf") or (href and href.endswith(".pdf")):
-                        pdf = href
-                        break
-                if not pdf:
-                    # Fallback: construct PDF URL from entry id
-                    entry_id = (e.findtext("atom:id", default="", namespaces=ns) or "").strip()
-                    if entry_id and "/abs/" in entry_id:
-                        pdf = entry_id.replace("/abs/", "/pdf/") + ".pdf"
-                if not summary:
-                    continue
+                rel_enable = True
+            if rel_enable:
+                relevant, reason = judge_relevance_llm(title, summary, q)
+            else:
+                relevant, reason = True, "relevance disabled"
+
+            processed += 1
+            if relevant:
+                kept += 1
+
+            pdf_path = ""
+            if relevant and pdf:
                 try:
-                    rel_enable = bool(cfg_get("pipeline.find_papers.relevance.enable", True))
-                except Exception:
-                    rel_enable = True
-                if rel_enable:
-                    relevant, reason = judge_relevance_llm(title, summary, q)
-                else:
-                    relevant, reason = True, "relevance disabled"
-                processed += 1
-                if relevant:
-                    kept += 1
-                pdf_path = ""
-                if relevant and pdf:
-                    try:
-                        out_dir.mkdir(parents=True, exist_ok=True)
-                        safe = _sanitize_filename(title) or title[:50]
-                        dest = out_dir / f"{safe}.pdf"
-                        rr = requests.get(pdf, stream=True, timeout=90, headers={"User-Agent": USER_AGENT})
-                        if rr.status_code == 200 and rr.headers.get("content-type", "").lower().startswith("application/pdf"):
-                            with open(dest, "wb") as f:
-                                for chunk in rr.iter_content(chunk_size=1 << 15):
-                                    if chunk:
-                                        f.write(chunk)
-                            pdf_path = str(dest)
-                            downloaded += 1
-                            print(f"[ARXIV DOWNLOADED] {dest}")
-                    except Exception as exc:
-                        print(f"[ARXIV DL FAIL] {title[:80]!r} :: {exc}")
-                with open(out_csv, "a", newline="", encoding="utf-8") as f:
-                    w = csv.writer(f)
-                    w.writerow([title, year, year, "", "", "", True, relevant, reason, pdf_path])
-                total_kept_so_far = prev_kept + kept
-                left_now = max(MAX_KEPT - total_kept_so_far, 0)
-                print(f"[ARXIV JUDGED] relevant={relevant} | kept_run={kept}/{processed} | kept_total={total_kept_so_far}/{MAX_KEPT} left={left_now} | downloaded={downloaded} :: {title[:90]}")
-                if prev_kept + kept >= MAX_KEPT:
-                    print(f"[ARXIV STOP] Reached MAX_KEPT={MAX_KEPT} (kept_total={prev_kept + kept}).")
-                    return
-            # Only one page per query when max_results_per_query is set
-            break
+                    out_dir.mkdir(parents=True, exist_ok=True)
+                    safe = _sanitize_filename(title) or title[:50]
+                    dest = out_dir / f"{safe}.pdf"
+                    rr = requests.get(pdf, stream=True, timeout=90, headers={"User-Agent": USER_AGENT})
+                    if rr.status_code == 200 and rr.headers.get("content-type", "").lower().startswith("application/pdf"):
+                        with open(dest, "wb") as f:
+                            for chunk in rr.iter_content(chunk_size=1 << 15):
+                                if chunk:
+                                    f.write(chunk)
+                        pdf_path = str(dest)
+                        downloaded += 1
+                        print(f"[ARXIV DOWNLOADED] {dest}")
+                except Exception as exc:
+                    print(f"[ARXIV DL FAIL] {title[:80]!r} :: {exc}")
+
+            with open(out_csv, "a", newline="", encoding="utf-8") as f:
+                w = csv.writer(f)
+                w.writerow([title, year, year, "", "", "", True, relevant, reason, pdf_path])
+
+            total_kept_so_far = prev_kept + kept
+            left_now = max(MAX_KEPT - total_kept_so_far, 0)
+            print(f"[ARXIV JUDGED] relevant={relevant} | kept_run={kept}/{processed} | kept_total={total_kept_so_far}/{MAX_KEPT} left={left_now} | downloaded={downloaded} :: {title[:90]}")
+
+            if prev_kept + kept >= MAX_KEPT:
+                print(f"[ARXIV STOP] Reached MAX_KEPT={MAX_KEPT} (kept_total={prev_kept + kept}).")
+                return
 
     # Decide provider once (auto/elsevier/arxiv) and do not retry per query
     try:

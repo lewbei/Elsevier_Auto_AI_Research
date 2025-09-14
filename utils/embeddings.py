@@ -44,18 +44,39 @@ def _pool_last_hidden_mean(last_hidden: Any, attn_mask: Any) -> Any:
     return summed / counts
 
 
+def _hf_token() -> str | None:
+    """Return a Hugging Face token from common env vars without printing it.
+
+    Checks: HUGGINGFACE_HUB_TOKEN, HUGGING_FACE_HUB_TOKEN, HUGGING_FACE_TOKEN, HF_TOKEN.
+    Returns None when not set.
+    """
+    for k in ("HUGGINGFACE_HUB_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGING_FACE_TOKEN", "HF_TOKEN"):
+        v = os.getenv(k)
+        if v:
+            return v
+    return None
+
+
 def _load_hf_model(model_name: str, dtype_str: str = "float16"):
     # Avoid top-level heavy imports
     from transformers import AutoModel, AutoTokenizer  # type: ignore
     import torch
 
     dtype = torch.float16 if str(dtype_str).lower() == "float16" else torch.float32
-    tok = AutoTokenizer.from_pretrained(model_name, use_auth_token=os.getenv("HUGGINGFACE_HUB_TOKEN") or os.getenv("HUGGING_FACE_TOKEN"))
-    model = AutoModel.from_pretrained(
-        model_name,
-        torch_dtype=dtype,
-        use_auth_token=os.getenv("HUGGINGFACE_HUB_TOKEN") or os.getenv("HUGGING_FACE_TOKEN"),
-    )
+    token = _hf_token()
+    if token:
+        tok = AutoTokenizer.from_pretrained(model_name, token=token)
+        model = AutoModel.from_pretrained(
+            model_name,
+            torch_dtype=dtype,
+            token=token,
+        )
+    else:
+        tok = AutoTokenizer.from_pretrained(model_name)
+        model = AutoModel.from_pretrained(
+            model_name,
+            torch_dtype=dtype,
+        )
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model.to(device)
     model.eval()
@@ -67,15 +88,25 @@ def _embed_hf(texts: List[str], model_name: str, *, batch_size: int = 8, max_len
     from transformers import AutoModel, AutoTokenizer  # type: ignore
     import torch
 
-    tok = AutoTokenizer.from_pretrained(model_name, use_auth_token=os.getenv("HUGGINGFACE_HUB_TOKEN") or os.getenv("HUGGING_FACE_TOKEN"))
+    token = _hf_token()
+    if token:
+        tok = AutoTokenizer.from_pretrained(model_name, token=token)
+    else:
+        tok = AutoTokenizer.from_pretrained(model_name)
     # dtype & device
     dtype = torch.float16 if str(dtype_str).lower() == "float16" else torch.float32
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = AutoModel.from_pretrained(
-        model_name,
-        torch_dtype=dtype,
-        use_auth_token=os.getenv("HUGGINGFACE_HUB_TOKEN") or os.getenv("HUGGING_FACE_TOKEN"),
-    ).to(device)
+    if token:
+        model = AutoModel.from_pretrained(
+            model_name,
+            torch_dtype=dtype,
+            token=token,
+        ).to(device)
+    else:
+        model = AutoModel.from_pretrained(
+            model_name,
+            torch_dtype=dtype,
+        ).to(device)
     model.eval()
 
     out_vecs: List[np.ndarray] = []

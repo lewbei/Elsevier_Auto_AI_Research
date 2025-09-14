@@ -93,6 +93,29 @@ def _normalize_model(provider: str, model: Optional[str]) -> str:
     return m
 
 
+def _strict_guard(provider: str, chat_url: str, model: str) -> None:
+    """Enforce strict YAML config if enabled to avoid unintended fallbacks."""
+    try:
+        strict = get_bool("llm.strict", False)
+    except Exception:
+        strict = False
+    if not strict:
+        return
+    # Ensure API key exists for resolved provider
+    api_env = _default_api_env(provider)
+    if not (os.getenv(api_env) or LLM_API_KEY):
+        raise LLMError(f"LLM strict: API key env '{api_env}' not set")
+    # If using OpenAI provider with default endpoint, only allow GPT-5 unless custom allowed
+    if provider == "openai" and chat_url.strip().lower() == _default_url_for("openai"):
+        m = (model or "").lower()
+        try:
+            allow_custom = bool(get("llm.allow_custom_openai_models", False))
+        except Exception:
+            allow_custom = False
+        if not (m.startswith("gpt-5-") or m == "gpt-5" or allow_custom):
+            raise LLMError("LLM strict: default OpenAI endpoint requires GPT-5 or allow_custom_openai_models=true")
+
+
 def _is_gpt5(provider: str, model: Optional[str]) -> bool:
     try:
         if provider != "openai":
@@ -313,6 +336,7 @@ def chat_json(system: str, user: str, *, temperature: float = 0.0, model: Option
     api_env = prof["api_env"]
     api_key = os.getenv(api_env) or LLM_API_KEY
     use_model = _normalize_model(provider, model or prof["model"])
+    _strict_guard(provider, chat_url, use_model)
     payload = {
         "model": use_model,
         "messages": [
@@ -320,6 +344,10 @@ def chat_json(system: str, user: str, *, temperature: float = 0.0, model: Option
             {"role": "user", "content": user},
         ],
         "response_format": {"type": "json_object"},
+        # provider/chat_url are kept only for local logging/caching; they are not
+        # sent to the remote API to preserve OpenAI-compat compliance.
+        "provider": provider,
+        "chat_url": chat_url,
     }
     # GPT‑5 family (OpenAI) does not accept temperature; omit key
     if not _is_gpt5(provider, use_model):
@@ -330,14 +358,17 @@ def chat_json(system: str, user: str, *, temperature: float = 0.0, model: Option
     if stream_enabled:
         payload["stream"] = True
 
+    # Build API body without non-spec keys
+    payload_api = {k: v for k, v in payload.items() if k not in {"provider", "chat_url"}}
+
     last_err = None
     delay = 2
     for attempt in range(1, max_tries + 1):
         try:
             if stream_enabled:
-                r = requests.post(chat_url, headers=_headers(provider, api_key), json=payload, timeout=timeout, stream=True)
+                r = requests.post(chat_url, headers=_headers(provider, api_key), json=payload_api, timeout=timeout, stream=True)
             else:
-                r = requests.post(chat_url, headers=_headers(provider, api_key), json=payload, timeout=timeout)
+                r = requests.post(chat_url, headers=_headers(provider, api_key), json=payload_api, timeout=timeout)
         except requests.RequestException as exc:
             last_err = exc
             if attempt == max_tries:
@@ -439,6 +470,7 @@ def chat_json_cached(system: str, user: str, *, temperature: float = 0.0, model:
     api_env = prof["api_env"]
     api_key = os.getenv(api_env) or LLM_API_KEY
     cache_model = _normalize_model(provider, model or prof["model"])
+    _strict_guard(provider, chat_url, cache_model)
     payload = {
         "model": cache_model,
         "messages": [
@@ -446,6 +478,8 @@ def chat_json_cached(system: str, user: str, *, temperature: float = 0.0, model:
             {"role": "user", "content": user},
         ],
         "response_format": {"type": "json_object"},
+        "provider": provider,
+        "chat_url": chat_url,
     }
     if not _is_gpt5(provider, cache_model):
         payload["temperature"] = temperature
@@ -487,9 +521,13 @@ def chat_text(messages: List[Dict[str, str]], *, temperature: float = 0.2, model
     api_env = prof["api_env"]
     api_key = os.getenv(api_env) or LLM_API_KEY
     text_model = _normalize_model(provider, model or prof["model"])
+    _strict_guard(provider, chat_url, text_model)
     payload = {
         "model": text_model,
         "messages": messages,
+        # provider/chat_url are for local logging/caching only; not sent to API
+        "provider": provider,
+        "chat_url": chat_url,
     }
     if not _is_gpt5(provider, text_model):
         payload["temperature"] = temperature
@@ -499,14 +537,17 @@ def chat_text(messages: List[Dict[str, str]], *, temperature: float = 0.2, model
     if stream_enabled:
         payload["stream"] = True
 
+    # Build API-compliant body (exclude non-spec keys)
+    payload_api = {k: v for k, v in payload.items() if k not in {"provider", "chat_url"}}
+
     last_err = None
     delay = 2
     for attempt in range(1, max_tries + 1):
         try:
             if stream_enabled:
-                r = requests.post(chat_url, headers=_headers(provider, api_key), json=payload, timeout=timeout, stream=True)
+                r = requests.post(chat_url, headers=_headers(provider, api_key), json=payload_api, timeout=timeout, stream=True)
             else:
-                r = requests.post(chat_url, headers=_headers(provider, api_key), json=payload, timeout=timeout)
+                r = requests.post(chat_url, headers=_headers(provider, api_key), json=payload_api, timeout=timeout)
         except requests.RequestException as exc:
             last_err = exc
             if attempt == max_tries:
@@ -598,10 +639,14 @@ def chat_text_cached(messages: List[Dict[str, str]], *, temperature: float = 0.2
     """
     prof = _resolve_profile(profile)
     provider = prof["provider"]
+    chat_url = prof["chat_url"]
     cache_model = _normalize_model(provider, model or prof["model"])
+    _strict_guard(provider, chat_url, cache_model)
     payload = {
         "model": cache_model,
         "messages": messages,
+        "provider": provider,
+        "chat_url": chat_url,
     }
     if not _is_gpt5(provider, cache_model):
         payload["temperature"] = temperature

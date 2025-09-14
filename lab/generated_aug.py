@@ -9,8 +9,11 @@ class GeneratedAug:
             self.pipe = None
         else:
             self.pipe = T.Compose([
-                T.Resize((256, 256)),
-                T.GaussianBlur(kernel_size=5, sigma=1.0),
+                # Deterministic resize to the requested input size
+                T.Resize((224, 224)),
+                # Very light, fixed Gaussian blur (fixed sigma for determinism)
+                T.GaussianBlur(kernel_size=3, sigma=0.1),
+                # Simple horizontal flip augmentation (stochastic)
                 T.RandomHorizontalFlip(p=0.5),
             ])
 

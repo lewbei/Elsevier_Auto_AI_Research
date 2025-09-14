@@ -38,91 +38,28 @@ research:
   num_contributions: 2
   num_questions: 1
 
-  # ---------------------------------------------------------------------------
-  # Provider Examples (uncomment and adjust; then set `use: custom` and point
-  # each stage to `llm: custom` to route through your chosen provider/model)
-  #
-  # 1) Z.AI GLM‑4.5 (OpenAI‑compatible)
-  #    - API provider: OpenAI compatible
-  #    - Base URL: https://api.z.ai/api/coding/paas/v4
-  #    - Chat endpoint: append /chat/completions
-  #    - API key env: ZAI_API_KEY
-  #
-  llm:
-    provider: openai
-    model: glm-4.5
-    chat_url: https://api.z.ai/api/coding/paas/v4/chat/completions
-    api_key_env: ZAI_API_KEY
-    default: ""          # no alias; stages use the main provider/model
-    custom: ""           # not used
-    use: default         # all stages use the main provider
-    stream: true
-    strict: true
-    allow_custom_openai_models: true
-    retry:
-      max_tries: 4
-      backoff_initial: 2
-      backoff_max: 60
-  #
-  # 2) DeepSeek (built‑in alias)
-  #  llm:
-  #    provider: openai    # leave as-is (ignored when using alias)
-  #    model: ""
-  #    chat_url: ""
-  #    api_key_env: ""
-  #    default: gpt-5-mini
-  #    custom: deepseek    # alias resolved to provider=deepseek, model=deepseek-chat
-  #    use: custom
-  #    stream: true
-  #    strict: true
-  #  Env: DEEPSEEK_API_KEY=****
-  #
-  # 3) DeepSeek (globals)
-  #  llm:
-  #    provider: deepseek
-  #    model: deepseek-chat
-  #    chat_url: ""        # defaults to https://api.deepseek.com/chat/completions
-  #    api_key_env: DEEPSEEK_API_KEY
-  #    default: gpt-5-mini
-  #    custom: ""
-  #    use: custom
-  #    stream: true
-  #    strict: true
-  #
-  # 4) OpenRouter (globals)
-  #  llm:
-  #    provider: openrouter
-  #    model: openai/gpt-5-nano   # pick any model id from OpenRouter
-  #    chat_url: ""               # defaults to https://openrouter.ai/api/v1/chat/completions
-  #    api_key_env: OPENROUTER_API_KEY
-  #    default: gpt-5-mini
-  #    custom: ""
-  #    use: custom
-  #    stream: true
-  #    strict: true
-  #  Optional courtesy envs: OPENROUTER_SITE, OPENROUTER_TITLE
-  #
-  # Stage routing when using `use: custom` (set in each stage):
-  #
-  #  pipeline:
-  #    summarize:
-  #      llm: custom
-  #    novelty:
-  #      llm: custom
-  #    planner:
-  #      llm: custom
-  #    iterate:
-  #      llm: custom
-  #    codegen:
-  #      llm: custom
-  #    idea_blueprints:
-  #      llm: custom
-  #    interactive:
-  #      llm: custom
+# ---------------------------------------------------------------------------
+# Global LLM profile (top-level). All agents read llm.* directly.
+# Z.AI GLM‑4.5 (OpenAI‑compatible) as default provider/model.
+llm:
+  provider: openai
+  model: glm-4.5
+  chat_url: https://api.z.ai/api/coding/paas/v4/chat/completions
+  api_key_env: ZAI_API_KEY
+  default: ""          # no alias; stages use the main provider/model
+  custom: ""           # not used
+  use: default         # all stages use the main provider
+  stream: true
+  strict: true
+  allow_custom_openai_models: true
+  retry:
+    max_tries: 4
+    backoff_initial: 2
+    backoff_max: 60
 
 # Embeddings and retrieval configuration (GPU-first, hard-fail when enabled)
 embeddings:
-  enable: false                 # set true to compute/store vectors
+  enable: true                  # set true to compute/store vectors
   provider: huggingface         # huggingface | openai
   model: google/embeddinggemma-300m
   dtype: float16                # float16 | float32
@@ -151,12 +88,12 @@ telemetry:
 pipeline:
   # Skip stages automatically without CLI or env flags
   skip:
-    find_papers: false
-    summaries: false
-    novelty: false
-    idea_blueprints: false
-    planner: false
-    iterate: false
+    find_papers: true
+    summaries: true
+    novelty: true
+    idea_blueprints: true
+    planner: true
+    iterate: true
     lit_review: false
     interactive: false
   # Number of iterate cycles (fallback to 2 if unset)
@@ -171,6 +108,22 @@ pipeline:
   write_paper_llm:
     enable: true   # enable LLM-based paper drafting
     # model: ""    # optional explicit model; empty uses llm.default
+    # Optional length/structure guidance
+    min_words: 12000
+    request_timeout: 900   # seconds; longform drafting can take minutes
+    request_retries: 4
+    section_min_paragraphs:
+      Introduction: 4
+      Related Work: 8
+      Methodology: 8
+      Experimental Setup: 3
+      Results: 8
+      Discussion: 8
+      Conclusion: 2
+  # Write paper style controls (non-LLM and LLM prompts)
+  write_paper_style:
+    referent: "This study"   # third-person subject phrase used in prose
+    page_reminder_after_intro: true   # insert a short page reminder after Introduction
   # Re-run stages even if artifacts already exist
   always_fresh: true
   # Summarize agent configuration
@@ -186,7 +139,7 @@ pipeline:
     save_raw: false       # save intermediate JSON files (*.pass1.json, *.merged.json, ...)
     print_raw: true       # print final LLM JSON (pre-validate) to console
     force_chunk: false    # force chunking instead of full-text pass
-    skip_existing: true   # skip re-summarizing existing JSONs
+    skip_existing: false  # one-pass reprocess to generate embeddings; set back to true after
     num_workers: 2        # planned: parallel PDF processing
     # Timeouts/retries (seconds/attempts). Full-text often needs longer.
     timeout: 60           # per-call timeout for chunked requests

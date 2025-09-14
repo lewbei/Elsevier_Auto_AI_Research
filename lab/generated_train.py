@@ -1,132 +1,156 @@
-# Tiny training hooks for ResNet18 + Scale-Selective Spectral Attention (SSSA)
-# Allowed building blocks: torchvision transforms and torch.nn layers only.
 import torch
 import torch.nn as nn
-from typing import Any
-try:
-    import torchvision.transforms as T  # type: ignore
-except Exception:
-    T = None  # type: ignore
+from torchvision import transforms
 
-def build_train_transforms(input_size: int):
+def build_train_transforms(input_size):
     """
-    Training augmentation is not predefined here.
-    Return None to let the runner/config decide, or optionally return a
-    torchvision transforms.Compose constructed by the caller.
+    Build a small, deterministic-but-useful training transform pipeline.
+    Allowed building blocks are used (Resize, RandomHorizontalFlip, ColorJitter,
+    RandomRotation, GaussianBlur, ToTensor, RandomErasing).
+
+    Keeps input_size clamped to safe range (96..512).
     """
-    _ = int(max(96, min(512, int(input_size))))  # normalize but unused
-    return None
+    # enforce safe range
+    input_size = int(max(96, min(int(input_size), 512)))
+
+    tr = transforms.Compose([
+        transforms.Resize((input_size, input_size)),
+        transforms.RandomHorizontalFlip(p=0.5),
+        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.15, hue=0.02),
+        transforms.RandomRotation(degrees=10),
+        transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 1.0)),
+        transforms.ToTensor(),
+        # RandomErasing operates on tensor images; keep p modest
+        transforms.RandomErasing(p=0.25, scale=(0.02, 0.25), ratio=(0.3, 3.3))
+    ])
+    return tr
 
 
-def build_model_head(in_features: int, num_classes: int) -> nn.Module:
+def build_model_head(in_features, num_classes):
     """
-    Small classification head. Kept intentionally compact so that any
-    additional novelty parameters (SSSA) can remain <= ~10% of baseline params.
-    Uses only torch.nn layers.
+    Build a compact model head that implements the ProtoAdapterMotion-Light idea
+    as a tiny module (defined locally to avoid additional top-level classes):
+
+    - appearance bottleneck: projects frozen backbone embedding (in_features) -> 64-D
+    - motion FiLM MLP: motion summary (64-D) -> 2*64 (gamma, beta)
+    - FiLM application: modulate bottleneck with gamma/beta
+    - up-projection: project modulated 64-D back to a prototype space (in_features)
+    - small linear classifier (proto_classifier) is provided for convenience; prototypes
+      for episodic ProtoNet computations may be computed externally from the
+      "projected" embeddings returned by forward().
+
+    Returned object is an nn.Module instance whose forward(appearance_emb, motion_summary)
+    returns a dict with keys: "modulated", "projected", "logits", "gamma", "beta".
     """
-    # Small hidden projection: scale with input but floor to keep it tiny.
-    hidden = int(max(32, min(128, max(1, int(in_features * 0.05)))))
-    head = nn.Sequential(
-        nn.Linear(in_features, hidden),
-        nn.ReLU(inplace=True),
-        nn.Linear(hidden, num_classes),
-    )
-    return head
+    # Keep dimensions small and deterministic:
+    bottleneck_dim = 64
+    motion_dim = 64
+
+    class AdapterHead(nn.Module):
+        def __init__(self, in_features, num_classes, bottleneck_dim=64, motion_dim=64):
+            super().__init__()
+            # appearance bottleneck: in_features -> 64
+            self.bottleneck = nn.Linear(in_features, bottleneck_dim)
+
+            # motion MLP: motion_dim -> 2 * bottleneck_dim (gamma and beta)
+            # single hidden layer kept tiny to satisfy parameter budget
+            self.film_mlp = nn.Sequential(
+                nn.Linear(motion_dim, motion_dim),
+                nn.ReLU(inplace=True),
+                nn.Linear(motion_dim, 2 * bottleneck_dim)
+            )
+
+            # up-project modulated bottleneck back to prototype space (in_features)
+            self.upproj = nn.Linear(bottleneck_dim, in_features)
+
+            # small classifier head (optional convenience, prototypes are expected
+            # to be computed episodically outside this module for ProtoNet loss).
+            self.proto_classifier = nn.Linear(in_features, num_classes)
+
+            # initialize weights small and stable
+            nn.init.normal_(self.bottleneck.weight, std=0.01)
+            nn.init.zeros_(self.bottleneck.bias)
+            nn.init.normal_(self.film_mlp[0].weight, std=0.01)
+            nn.init.zeros_(self.film_mlp[0].bias)
+            nn.init.normal_(self.film_mlp[2].weight, std=0.01)
+            nn.init.zeros_(self.film_mlp[2].bias)
+            nn.init.normal_(self.upproj.weight, std=0.01)
+            nn.init.zeros_(self.upproj.bias)
+            nn.init.normal_(self.proto_classifier.weight, std=0.01)
+            nn.init.zeros_(self.proto_classifier.bias)
+
+        def forward(self, appearance_emb, motion_summary):
+            """
+            appearance_emb: Tensor [B, in_features] (e.g., pooled ResNet-18 output)
+            motion_summary: Tensor [B, motion_dim] (precomputed per-crop absolute frame-diff pooled to 64-D)
+
+            Returns a dict:
+              - "modulated": [B, bottleneck_dim] FiLM-modulated bottleneck embedding
+              - "projected": [B, in_features] up-projected embedding usable for prototype computation
+              - "logits": [B, num_classes] optional linear logits from projected embeddings
+              - "gamma", "beta": FiLM parameters [B, bottleneck_dim] each
+            """
+            z = self.bottleneck(appearance_emb)  # [B, bottleneck_dim]
+            film_params = self.film_mlp(motion_summary)  # [B, 2*bottleneck_dim]
+            gamma, beta = film_params.chunk(2, dim=-1)
+            z_mod = gamma * z + beta
+            up = self.upproj(z_mod)
+            logits = self.proto_classifier(up)
+            return {"modulated": z_mod, "projected": up, "logits": logits, "gamma": gamma, "beta": beta}
+
+    return AdapterHead(int(in_features), int(num_classes), bottleneck_dim=bottleneck_dim, motion_dim=motion_dim)
 
 
-def update_spec(spec: dict) -> dict:
+def update_spec(spec):
     """
-    Update the run spec to include succinct SSSA (Scale-Selective Spectral Attention)
-    configuration and enforce safe numeric ranges.
+    Sanitize and clamp the incoming spec to safe defaults required by the
+    experimental budget and acceptance criteria.
 
-    SSSA summary (stored under spec['novelty_component']['sssa_params']):
-      - block_size: 8 (non-overlapping 8x8 DCT blocks on normalized input)
-      - bands: partition zig-zag flattened block into low=6, mid=12, high=(remaining)
-      - target_scales: ['layer2','layer3','layer4'] (ResNet intermediate outputs)
-      - per-band 1x1 conv projections are bilinearly upsampled to each scale spatial size
-      - per-(band x channel) scalar gates are learned (init=1.0) with L1 reg lambda=1e-4
-      - parameter increase target: <= 0.10 (10%) of baseline; projection widths must be reduced as needed
-      - enabled: True
-    Notes: The core model modifications are implemented as a lightweight spectral modulation
-    on multi-scale features and are intended to be applied before any fusion/pooling.
+    - lr clamped to [1e-5, 1e-1]
+    - max_train_steps clamped to [10, 1000]
+    - input_size clamped to [96, 512]
+    - ensures episodes_per_step and validate_every_steps default values
+      (episodes_per_step=4, validate_every_steps=10) required by the brief.
+    - preserves other keys (including novelty description and sssa params)
     """
-    # Ensure basic numeric ranges are safe and deterministic
-    spec = dict(spec)  # shallow copy to avoid mutating caller data in-place
-    spec.setdefault('title', 'ResNet18 + Scale-Selective Spectral Attention (SSSA)')
-    # Clamp input size to allowed range
-    if 'input_size' in spec:
-        spec['input_size'] = int(max(96, min(512, int(spec['input_size']))))
-    # Clamp learning rate to safe range (1e-5 .. 1e-1)
-    if 'lr' in spec:
-        spec['lr'] = float(max(1e-5, min(1e-1, float(spec['lr']))))
-    # Clamp max_train_steps to safe range (10 .. 1000)
-    if 'max_train_steps' in spec:
-        spec['max_train_steps'] = int(max(10, min(1000, int(spec['max_train_steps']))))
-    # Ensure seed is present
-    spec.setdefault('seed', 42)
+    # Copy to avoid mutating caller object
+    out = dict(spec)
 
-    # Production defaults for common training toggles (safe, conservative)
-    def _truthy(x: Any) -> bool:
-        s = str(x).strip().lower()
-        return s in {"1", "true", "yes", "on"}
+    if "lr" in out:
+        try:
+            out["lr"] = float(out["lr"])
+        except Exception:
+            out["lr"] = 0.0003
+    out["lr"] = float(max(1e-5, min(out.get("lr", 1e-3), 1e-1)))
 
-    # batch_size and optimizer defaults
-    try:
-        if 'batch_size' in spec:
-            spec['batch_size'] = int(max(1, min(1024, int(spec['batch_size']))))
-        else:
-            spec['batch_size'] = 16
-    except Exception:
-        spec['batch_size'] = 16
-    # Do not predefine optimizer here; leave to runner/config
+    if "max_train_steps" in out:
+        try:
+            out["max_train_steps"] = int(out["max_train_steps"])
+        except Exception:
+            out["max_train_steps"] = 100
+    out["max_train_steps"] = int(max(10, min(out.get("max_train_steps", 100), 1000)))
 
-    # DataLoader hints
-    try:
-        if 'num_workers' in spec:
-            spec['num_workers'] = int(max(0, min(16, int(spec['num_workers']))))
-    except Exception:
-        spec['num_workers'] = 0
-    try:
-        spec['pin_memory'] = bool(spec['pin_memory']) if 'pin_memory' in spec else False
-    except Exception:
-        spec['pin_memory'] = False
-    try:
-        spec['persistent_workers'] = bool(spec['persistent_workers']) if 'persistent_workers' in spec else False
-    except Exception:
-        spec['persistent_workers'] = False
+    if "input_size" in out:
+        try:
+            out["input_size"] = int(out["input_size"])
+        except Exception:
+            out["input_size"] = 224
+    out["input_size"] = int(max(96, min(out.get("input_size", 224), 512)))
 
-    # Reproducibility and AMP
+    # enforce episodes_per_step and validate cadence required by the design
+    out.setdefault("episodes_per_step", 4)
     try:
-        spec['deterministic'] = _truthy(spec['deterministic']) if 'deterministic' in spec else False
+        out["episodes_per_step"] = int(out["episodes_per_step"])
     except Exception:
-        spec['deterministic'] = False
-    try:
-        spec['amp'] = _truthy(spec['amp']) if 'amp' in spec else False
-    except Exception:
-        spec['amp'] = False
-    try:
-        if 'log_interval' in spec:
-            spec['log_interval'] = int(max(0, int(spec['log_interval'])))
-    except Exception:
-        pass
+        out["episodes_per_step"] = 4
 
-    # Attach succinct SSSA config under novelty_component for downstream hooks
-    novelty = spec.get('novelty_component', {})
-    sssa_params = {
-        'enabled': True,
-        'description': 'Scale-Selective Spectral Attention (SSSA): 8x8 DCT blocks, '
-                       'zig-zag partitioning into low(6), mid(12), high(rest); '
-                       'per-band 1x1 projections + per-(band×channel) gates (init=1.0); '
-                       'L1 regularization lambda=1e-4; target param overhead <= 0.10.',
-        'block_size': 8,
-        'bands': {'low': 6, 'mid': 12, 'high': 'rest'},
-        'target_scales': ['layer2', 'layer3', 'layer4'],
-        'gate_init': 1.0,
-        'l1_lambda': 1e-4,
-        'param_overhead_fraction': 0.10,
-    }
-    novelty['sssa_params'] = sssa_params
-    novelty['enabled'] = True
-    spec['novelty_component'] = novelty
+    out.setdefault("validate_every_steps", 10)
+    try:
+        out["validate_every_steps"] = int(out["validate_every_steps"])
+    except Exception:
+        out["validate_every_steps"] = 10
 
-    return spec
+    # ensure use_generated_head is present (brief expects generated head behavior)
+    out.setdefault("use_generated_head", True)
+
+    return out

@@ -22,18 +22,20 @@ load_dotenv()
 
 DATA_DIR = pathlib.Path("data")
 SUM_DIR = DATA_DIR / "summaries"
-REPORT_PATH = DATA_DIR / "novelty_report.json"
+NOVELTY_DIR = DATA_DIR / "novelty"
+REPORT_PATH = NOVELTY_DIR / "novelty_report.json"
  
 # Files for optional multi‑agent discussion logs
-NOVELTY_SESSION = DATA_DIR / "novelty_session.jsonl"
-NOVELTY_TRANSCRIPT = DATA_DIR / "novelty_transcript.md"
-NOVELTY_UNIQ_JSON = DATA_DIR / "novelty_uniqueness.json"
-NOVELTY_UNIQ_TRANSCRIPT = DATA_DIR / "novelty_uniqueness.md"
+NOVELTY_SESSION = NOVELTY_DIR / "novelty_session.jsonl"
+NOVELTY_TRANSCRIPT = NOVELTY_DIR / "novelty_transcript.md"
+NOVELTY_UNIQ_JSON = NOVELTY_DIR / "novelty_uniqueness.json"
+NOVELTY_UNIQ_TRANSCRIPT = NOVELTY_DIR / "novelty_uniqueness.md"
 
 
 def _ensure_dirs() -> None:
-    SUM_DIR.mkdir(parents=True, exist_ok=True)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    SUM_DIR.mkdir(parents=True, exist_ok=True)
+    NOVELTY_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # --- BEGIN: Tier-1 verbatim user-spec injection helper ---
@@ -471,6 +473,7 @@ def _persona_discussion(summaries: List[Dict[str, Any]], facets: Dict[str, List[
     # Prepare compact context from summaries to keep tokens bounded
     try:
         ctx_items: List[Dict[str, Any]] = []
+        allowed_titles: List[str] = []
         for s in summaries[:30]:  # cap to 30 papers for brevity
             ctx_items.append({
                 "title": str(s.get("title") or "")[:120],
@@ -478,6 +481,9 @@ def _persona_discussion(summaries: List[Dict[str, Any]], facets: Dict[str, List[
                 "methods": (s.get("methods") or [])[:5],
                 "limitations": (s.get("limitations") or [])[:5],
             })
+            t = str(s.get("title") or "").strip()
+            if t:
+                allowed_titles.append(t)
         # Facets summary passed to personas to avoid "missing inputs" loops
         fsum = {
             "backbones": (facets or {}).get("backbones", [])[:10],
@@ -489,12 +495,12 @@ def _persona_discussion(summaries: List[Dict[str, Any]], facets: Dict[str, List[
             "User",
             (
                 "We will discuss novelty themes across the provided papers and propose novel, actionable ideas under tight compute.\n"
-                "You have everything you need: use ONLY the provided facets (backbones/ops/datasets) and the listed paper titles/context.\n"
-                "Do NOT ask for additional inputs or options; proceed using the provided facets and context; state assumptions explicitly when needed.\n"
-                "Provide role-aware, concrete observations: clusters, gaps, risks, and specific crossovers to try."
+                "STRICT GROUNDING: Use ONLY the provided facets (backbones/ops/datasets) and the listed paper titles. Where you cite titles, select from allowed_titles.\n"
+                "VALIDATION: When asked for decisions, respond in concise, structured form; keep within length budgets.\n"
+                "CONSENSUS: When prompted, reply with 'AGREE_NOVELTY: yes|no' and a one-line SPEC_HINT; be explicit.\n"
             ),
         )
-        dm.post("User", json.dumps({"papers": ctx_items, "facets": fsum}, ensure_ascii=False))
+        dm.post("User", json.dumps({"papers": ctx_items, "facets": fsum, "allowed_titles": allowed_titles}, ensure_ascii=False))
 
         steps = 3
         # Prefer YAML, but allow env override via NOVELTY_STEPS
@@ -606,12 +612,12 @@ def _persona_discussion(summaries: List[Dict[str, Any]], facets: Dict[str, List[
                 except Exception:
                     return order[index] if 0 <= index < len(order) else ""
 
-            # Proposals from proposers (force citations + deltas)
+            # Proposals from proposers (force citations + deltas; titles subset of allowed_titles)
             for p_idx, role in enumerate(proposers):
                 prompt = (
                     f"From the perspective of {_alias_at(p_idx)}, propose 2 concrete NOVELTY directions grounded in the provided papers and facets.\n"
                     "Each must include:\n"
-                    "TITLES:[t1,t2], DELTA_VS_PRIOR:<one sentence referencing t1/t2>, SPEC_HINT:<numbers>, RISK:<one line>.\n"
+                    "TITLES:[t1,t2] (subset of allowed_titles), DELTA_VS_PRIOR:<one sentence referencing t1/t2>, SPEC_HINT:<numbers>, RISK:<one line>.\n"
                     "Use ONLY backbones from facets.backbones. If detection, include yolo_version, iou_thresh, nms.\n"
                     "Do NOT ask for inputs; proceed using provided facets and context.\n"
                     "Prefix each with 'PROPOSAL_NOVELTY:'."
@@ -713,7 +719,7 @@ def _persona_discussion(summaries: List[Dict[str, Any]], facets: Dict[str, List[
                             print(note)
                         except Exception:
                             pass
-                # Consensus vote
+                # Consensus vote (quorum-based)
                 agrees = 0
                 for idx, role in enumerate(order):
                     r = dm.step_role(role, prompt=(
@@ -733,27 +739,33 @@ def _persona_discussion(summaries: List[Dict[str, Any]], facets: Dict[str, List[
                         agrees += 1
                 # Record consensus outcome (best-effort visibility in logs/transcript)
                 try:
+                    from math import ceil as _ceil
+                    quorum = _ceil(0.66 * max(1, len(order)))
                     append_jsonl(NOVELTY_SESSION, {
                         "role": "system",
                         "phase": "consensus_result",
                         "yes_votes": int(agrees),
                         "total": int(len(order)),
-                        "agreed": bool(agrees >= len(order)),
+                        "quorum": int(quorum),
+                        "agreed": bool(agrees >= quorum),
                     })
                 except Exception:
                     pass
                 # Also add a concise note line
                 try:
-                    notes.append(f"[Consensus] yes={agrees}/{len(order)} agreed={agrees >= len(order)}")
+                    from math import ceil as _ceil
+                    quorum = _ceil(0.66 * max(1, len(order)))
+                    notes.append(f"[Consensus] yes={agrees}/{len(order)} quorum={quorum} agreed={agrees >= quorum}")
                 except Exception:
                     pass
-                if agrees >= len(order):
+                from math import ceil as _ceil
+                if agrees >= _ceil(0.66 * max(1, len(order))):
                     agreed = True
 
-            # Final consensus summary
+            # Final consensus summary (ask for concise structured info)
             leader = order[1] if len(order) > 1 else order[0]
             r = dm.step_role(leader, prompt=(
-                "Provide a CONSENSUS_NOVELTY_SUMMARY: one paragraph merging the best novelty proposal, with lines for NOVELTY_KIND and SPEC_HINT; must be constraints-aware."
+                "Provide a CONSENSUS_NOVELTY_SUMMARY: one paragraph merging the best novelty proposal, with lines for NOVELTY_KIND and SPEC_HINT; cite at least two titles from allowed_titles."
             ))
             # Alias is second role's alias if exists; else first
             leader_idx = 1 if len(order) > 1 else 0
@@ -951,10 +963,10 @@ def main() -> None:
                     continue  # skip self
                 out.append({"key": keys[idx], "sim": float(sims[j])})
             neighbors[key] = out
-        (DATA_DIR / "retrieval_neighbors.json").write_text(json.dumps(neighbors, ensure_ascii=False, indent=2), encoding="utf-8")
+        (NOVELTY_DIR / "retrieval_neighbors.json").write_text(json.dumps(neighbors, ensure_ascii=False, indent=2), encoding="utf-8")
         if _progress:
             try:
-                print(f"[NOVELTY] Wrote retrieval neighbors: {DATA_DIR / 'retrieval_neighbors.json'}")
+                print(f"[NOVELTY] Wrote retrieval neighbors: {NOVELTY_DIR / 'retrieval_neighbors.json'}")
             except Exception:
                 pass
 
@@ -1142,7 +1154,7 @@ def main() -> None:
             "num_themes": len(final.get("themes") or []),
             "num_new_ideas": len(final.get("new_ideas") or []),
         }
-        (DATA_DIR / "lit_stats.json").write_text(json.dumps(stats, ensure_ascii=False, indent=2), encoding="utf-8")
+        (NOVELTY_DIR / "lit_stats.json").write_text(json.dumps(stats, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:
         pass
 
