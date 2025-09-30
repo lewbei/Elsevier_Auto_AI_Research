@@ -4,12 +4,10 @@ import time
 from pathlib import Path
 from typing import Any, Dict
 
-from dotenv import load_dotenv
 from lab.logging_utils import append_jsonl
 from agents.iterate import iterate
 
 
-load_dotenv()
 
 RUNS_DIR = Path("runs")
 DATA_DIR = Path("data")
@@ -91,4 +89,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

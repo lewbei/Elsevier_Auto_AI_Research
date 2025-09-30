@@ -2,7 +2,6 @@ import os
 import json
 import pathlib
 from typing import Dict, Any, List, Tuple
-from dotenv import load_dotenv
 
 from utils.llm_utils import chat_json, LLMError, LLM_PROVIDER, LLM_MODEL
 from lab.config import get
@@ -18,7 +17,6 @@ except Exception:
     DialogueManager = None  # type: ignore
 
 
-load_dotenv()
 
 DATA_DIR = pathlib.Path("data")
 SUM_DIR = DATA_DIR / "summaries"

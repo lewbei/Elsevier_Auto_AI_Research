@@ -15,10 +15,7 @@ import hashlib
 import pathlib
 import datetime
 import atexit
-from dotenv import load_dotenv
 from lab.config import get, get_bool
-
-load_dotenv()
 
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 DEEPSEEK_CHAT_URL = os.getenv("DEEPSEEK_CHAT_URL", "https://api.deepseek.com/chat/completions")

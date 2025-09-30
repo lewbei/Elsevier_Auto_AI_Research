@@ -5,12 +5,10 @@ from pathlib import Path
 import json
 import os
 
-from dotenv import load_dotenv
 from .config import get_bool, get
 from utils.llm_utils import chat_text_cached, LLMError
 
 
-load_dotenv()
 
 
 def _safe_float(x: Any, default: float = 0.0) -> float:
@@ -108,4 +106,3 @@ def write_analysis_files(
     llm_txt = summarize_runs_llm(runs, decision, plan=plan, novelty=novelty_spec or {})
     if llm_txt:
         (out_dir / "analysis.md").write_text(llm_txt + "\n", encoding="utf-8")
-

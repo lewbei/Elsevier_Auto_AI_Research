@@ -16,12 +16,10 @@ import pathlib
 from typing import Any, Dict, List
 import os
 
-from dotenv import load_dotenv
 from lab.config import get
 from utils.llm_utils import chat_text_cached, LLMError
 
 
-load_dotenv()
 
 DATA_DIR = pathlib.Path("data")
 SUM_DIR = DATA_DIR / "summaries"

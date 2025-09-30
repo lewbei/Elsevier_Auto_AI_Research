@@ -238,6 +238,55 @@ pipeline:
     enable: true
     editor:
       enable: true  # Generate training hooks
+    structured:
+      enable: true  # Enable new structured JSON-based codegen workflow
+      auto_commit: false  # If true and tests pass, files are committed on a new branch
+      open_pr: false      # Placeholder toggle (no network PR creation implemented)
+      temperature: 0.2    # Determinism knob
+      deterministic:
+        seed: 1234
+      sandbox:
+        timeout: 60
+      branch_prefix: codegen
+```
+
+#### Structured Codegen Workflow
+
+When `pipeline.codegen.structured.enable` is true the system performs a safe, reviewable code generation flow:
+
+1. Repository Awareness: It collects a lightweight repo tree and file heads to provide context to the LLM (no large file streaming).
+2. Plan Generation: The LLM must return strict JSON conforming to a Pydantic schema (`CodegenPlan`) listing every file artifact with: path, language, intent, action (create|update|patch), and full content (plus expected test names).
+3. Staging: Files are written only into an isolated run directory `runs/codegen/run_<timestamp>/staging`.
+4. Patch Bundle: A unified diff file `changes.patch` is produced for quick human review.
+5. Testing: Pytest executes inside a sandboxed subprocess with a timeout (`pipeline.codegen.sandbox.timeout`). The repository itself is not modified yet.
+6. Commit (Optional): Only if tests pass AND `auto_commit` is true are staged files copied into the repo and committed on a new branch named `<branch_prefix>/<timestamp>`.
+7. Idempotency: A registry file `.codegen_registry.jsonl` stores checksum manifests to skip identical plans on reruns.
+8. Logging & Artifacts: The entire plan JSON, patch file, and test output are stored under the run directory; future UI hooks can render them.
+
+Determinism knobs:
+- `pipeline.codegen.temperature` and `pipeline.codegen.deterministic.seed` seed Python + NumPy; temperature steers LLM variability.
+
+Security / Safety:
+- No direct in-place edits before tests.
+- Pydantic validation prevents path traversal (".." in paths is rejected).
+- Only relative repo paths are allowed; hidden and large directories are skipped from context.
+- Sandbox test execution isolates environment variables and enforces a timeout.
+
+Extending the Schema:
+- See `lab/codegen_schema.py` to add new fields (e.g., lint directives). Backwards compatible changes require adjusting the system prompt to reflect the updated schema.
+
+Manual Review Flow (recommended):
+1. Enable structured codegen with `auto_commit: false`.
+2. Run your pipeline; inspect `runs/codegen/run_*/changes.patch`.
+3. Apply patch manually or toggle `auto_commit: true` for future runs.
+
+Example invoking programmatically:
+
+```python
+from lab.codegen_structured import run_structured_codegen
+res = run_structured_codegen("Add a utility function to compute F1 score")
+if res and res.success:
+    print("Plan applied, review:", res.run_dir)
 ```
 
 ### Human-in-the-Loop
@@ -266,6 +315,7 @@ Current test coverage includes:
 - Prompt overrides
 - Paper generation
 - Security validation
+- Structured codegen schemas and idempotency registry
 
 ## 📚 Documentation
 

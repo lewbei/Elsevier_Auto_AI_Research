@@ -6,7 +6,6 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, List
 
-from dotenv import load_dotenv
 from lab.config import get_bool, get
 
 try:
@@ -15,11 +14,22 @@ except Exception:
     DialogueManager = None  # type: ignore
 
 
-load_dotenv()
 
 HERE = Path(__file__).parent.parent.resolve()
 DATA = HERE / "data"
 RUNS = HERE / "runs"
+PDF_DIR = HERE / "pdfs"
+SUM_DIR = DATA / "summaries"
+NOVELTY_REPORT = DATA / "novelty_report.json"
+PLANS_DIR = DATA / "plans"
+PLAN_FILE = DATA / "plan.json"
+
+
+def _has_json_files(folder: Path) -> bool:
+    try:
+        return any(folder.glob("*.json"))
+    except Exception:
+        return False
 
 
 def _write_text(p: Path, s: str) -> None:
@@ -231,23 +241,24 @@ def main() -> None:
         # Programmatic call (no CLI), using stage config from YAML
         try:
             from agents.summarize import process_pdfs
-            pdf_dir = HERE / "pdfs"
-            sum_dir = HERE / "data" / "summaries"
             # Prefetch embeddings model when enabled to reduce first-run latency/failures
             _prefetch_embeddings_model()
             # Count PDFs and detect missing summaries by filename
             try:
-                pdfs = sorted([p for p in pdf_dir.glob("*.pdf") if p.is_file()]) if pdf_dir.exists() else []
+                pdfs = sorted([p for p in PDF_DIR.glob("*.pdf") if p.is_file()]) if PDF_DIR.exists() else []
                 pdf_count = len(pdfs)
                 missing = []
                 for p in pdfs:
-                    out_path = (sum_dir / f"{p.stem}.json")
+                    out_path = (SUM_DIR / f"{p.stem}.json")
                     if not out_path.exists():
                         missing.append(p)
                 print(f"[ORCH] Summaries: found {pdf_count} PDFs; missing={len(missing)}")
                 summaries_up_to_date = (pdf_count > 0 and len(missing) == 0)
             except Exception:
                 summaries_up_to_date = False
+            if pdf_count == 0:
+                print("[ORCH] Summaries skipped: no PDFs found under pdfs/.")
+                summaries_up_to_date = True  # avoid calling process_pdfs
             # Prefer full-text mode for GPT-5 mini
             profile = (get("pipeline.summarize.llm", None) or None)
             model = (get("pipeline.summarize.model", None) or None)
@@ -276,8 +287,8 @@ def main() -> None:
                 if not locals().get("summaries_up_to_date", False):
                     t0 = time.time()
                     process_pdfs(
-                pdf_dir=str(pdf_dir),
-                out_dir=str(sum_dir),
+                pdf_dir=str(PDF_DIR),
+                out_dir=str(SUM_DIR),
                 max_pages=int(get("pipeline.summarize.max_pages", 0) or 0),
                 max_chars=int(get("pipeline.summarize.max_chars", 0) or 0),
                 chunk_size=chunk_size,
@@ -308,45 +319,119 @@ def main() -> None:
 
     # Phase: novelty
     if not (get_bool("pipeline.skip.novelty", False) or (str(os.getenv("SKIP_NOVELTY", "")).lower() in {"1", "true", "yes"})):
-        notes = _persona_phase_notes("novelty", {}, steps)
-        if notes:
-            log("novelty_notes", notes)
-            _write_text(notes_dir / "novelty.txt", "\n\n".join(notes))
-        # Per-stage streaming for novelty
-        try:
-            nov_stream = bool(get_bool("pipeline.novelty.stream", get_bool("llm.stream", False)))
-        except Exception:
-            nov_stream = False
-        env = {"LLM_STREAM": "1"} if nov_stream else {}
-        t0 = time.time()
-        _run_mod("agents.novelty", env_overrides=env)
-        stage_time["novelty"] = time.time() - t0
+        if not _has_json_files(SUM_DIR):
+            print("[ORCH] Skipping novelty: no summaries found in data/summaries.")
+        else:
+            notes = _persona_phase_notes("novelty", {}, steps)
+            if notes:
+                log("novelty_notes", notes)
+                _write_text(notes_dir / "novelty.txt", "\n\n".join(notes))
+            # Per-stage streaming for novelty
+            try:
+                nov_stream = bool(get_bool("pipeline.novelty.stream", get_bool("llm.stream", False)))
+            except Exception:
+                nov_stream = False
+            env = {"LLM_STREAM": "1"} if nov_stream else {}
+            t0 = time.time()
+            _run_mod("agents.novelty", env_overrides=env)
+            stage_time["novelty"] = time.time() - t0
     else:
         print("[ORCH] Skipping novelty per config/env")
 
     # Phase: idea_blueprints (expand top ideas into runnable blueprints)
     if not (get_bool("pipeline.skip.idea_blueprints", False) or (str(os.getenv("SKIP_IDEA_BLUEPRINTS", "")).lower() in {"1", "true", "yes"})):
-        notes = _persona_phase_notes("idea_blueprints", {}, steps)
-        if notes:
-            log("idea_blueprints_notes", notes)
-            _write_text(notes_dir / "idea_blueprints.txt", "\n\n".join(notes))
-        t0 = time.time()
-        _run_mod("agents.idea_blueprints")
-        stage_time["idea_blueprints"] = time.time() - t0
+        if not NOVELTY_REPORT.exists():
+            print("[ORCH] Skipping idea_blueprints: data/novelty_report.json not found.")
+        else:
+            notes = _persona_phase_notes("idea_blueprints", {}, steps)
+            if notes:
+                log("idea_blueprints_notes", notes)
+                _write_text(notes_dir / "idea_blueprints.txt", "\n\n".join(notes))
+            t0 = time.time()
+            _run_mod("agents.idea_blueprints")
+            stage_time["idea_blueprints"] = time.time() - t0
     else:
         print("[ORCH] Skipping idea_blueprints per config/env")
 
     # Phase: plan
     if not (get_bool("pipeline.skip.planner", False) or (str(os.getenv("SKIP_PLANNER", "")).lower() in {"1", "true", "yes"})):
-        notes = _persona_phase_notes("plan", {}, steps)
-        if notes:
-            log("plan_notes", notes)
-            _write_text(notes_dir / "plan.txt", "\n\n".join(notes))
-        t0 = time.time()
-        _run_mod("agents.planner")
-        stage_time["planner"] = time.time() - t0
+        if not NOVELTY_REPORT.exists():
+            print("[ORCH] Skipping planner: data/novelty_report.json not found.")
+        else:
+            notes = _persona_phase_notes("plan", {}, steps)
+            if notes:
+                log("plan_notes", notes)
+                _write_text(notes_dir / "plan.txt", "\n\n".join(notes))
+            t0 = time.time()
+            _run_mod("agents.planner")
+            stage_time["planner"] = time.time() - t0
+            # Optional plan evaluation (feedback loop)
+        try:
+            from lab.config import get_bool as _gb  # local import for safety
+            if _gb("feedback.plan_eval.enable", _gb("feedback.enable", False)):
+                print("[ORCH] Evaluating plan(s)…")
+                try:
+                    from agents.plan_evaluator import evaluate_plans  # type: ignore
+                except Exception:
+                    evaluate_plans = None  # type: ignore
+                if evaluate_plans is not None:
+                    plans_dir = DATA / "plans"
+                    plan_files: List[Path] = []
+                    if plans_dir.exists():
+                        try:
+                            plan_files = sorted(plans_dir.glob("plan_*.json"))
+                        except Exception:
+                            plan_files = []
+                    # Fallback single plan
+                    if not plan_files:
+                        single = DATA / "plan.json"
+                        if single.exists():
+                            plan_files = [single]
+                    if plan_files:
+                        try:
+                            res = evaluate_plans(plan_files)
+                            (DATA / "plan_eval.json").write_text(json.dumps(res, ensure_ascii=False, indent=2), encoding="utf-8")
+                            print("[ORCH] Plan evaluation complete: plan_eval.json written")
+                        except Exception as _pexc:
+                            print(f"[ORCH] Plan evaluation failed: {_pexc}")
+        except Exception:
+            pass
     else:
         print("[ORCH] Skipping planner per config/env")
+
+    # Phase: structured codegen (optional) – runs after plan so it can react to plan.json
+    try:
+        use_structured_codegen = bool(get_bool("pipeline.codegen.structured.enable", False))
+    except Exception:
+        use_structured_codegen = False
+    if use_structured_codegen:
+        try:
+            from lab.codegen_structured import run_structured_codegen  # type: ignore
+            objective = str(get("pipeline.codegen.structured.objective", "") or "")
+            extra = None
+            # Provide current plan.json if present
+            plan_path = DATA / "plan.json"
+            if plan_path.exists():
+                try:
+                    plan_json = plan_path.read_text(encoding="utf-8")
+                    extra = f"Current plan artifact: {plan_json[:4000]}"
+                except Exception:
+                    pass
+            cg_res = run_structured_codegen(objective, extra_instructions=extra)
+            if cg_res is not None:
+                try:
+                    _write_text(DATA / "structured_codegen_result.json", cg_res.model_dump_json(indent=2))
+                except Exception:
+                    pass
+                try:
+                    print(f"[ORCH] Structured codegen success={cg_res.success} run_dir={cg_res.run_dir}")
+                except Exception:
+                    pass
+        except Exception as exc:
+            try:
+                print(f"[ORCH] Structured codegen failed: {exc}")
+            except Exception:
+                pass
 
     # Phase: data prep (advice only; iterate consumes persona notes when enabled)
     notes = _persona_phase_notes("data_prep", {}, steps)
@@ -368,33 +453,35 @@ def main() -> None:
     # Phase: run (iterate) — supports per-blueprint multi-plan mode
     if not (get_bool("pipeline.skip.iterate", False) or (str(os.getenv("SKIP_ITERATE", "")).lower() in {"1", "true", "yes"})):
         multi = get_bool("pipeline.planner.plan_each_blueprint", False) or (str(os.getenv("PLAN_EACH_BLUEPRINT", "")).lower() in {"1", "true", "yes"})
-        plans_dir = DATA / "plans"
         plan_files: List[Path] = []
-        if multi and plans_dir.exists():
+        if PLANS_DIR.exists():
             try:
-                plan_files = sorted(plans_dir.glob("plan_*.json"), key=lambda p: p.name)
+                plan_files = sorted(PLANS_DIR.glob("plan_*.json"), key=lambda p: p.name)
             except Exception:
                 plan_files = []
-        if multi and plan_files:
-            print(f"[ORCH] Multi-plan iterate enabled: {len(plan_files)} plans found")
-            for idx, pfile in enumerate(plan_files, start=1):
-                try:
-                    # Overwrite data/plan.json with this plan for downstream consumption
-                    plan_json = pfile.read_text(encoding="utf-8")
-                    (DATA / "plan.json").write_text(plan_json, encoding="utf-8")
-                except Exception as exc:
-                    print(f"[ORCH] Failed to set active plan from {pfile}: {exc}")
-                    continue
-                notes = _persona_phase_notes("run_iterate", {"plan_file": str(pfile.name)}, steps)
-                if notes:
-                    log("iterate_notes", notes)
-                    _write_text(notes_dir / f"iterate_{idx}.txt", "\n\n".join(notes))
-                t0 = time.time()
-                # Optionally tag the stage with plan index
-                env = {"LLM_STAGE": f"iterate_{idx}"}
-                _run_mod("agents.iterate", env_overrides=env)
-                stage_time[f"iterate_{idx}"] = time.time() - t0
-        else:
+        if multi:
+            if not plan_files and PLAN_FILE.exists():
+                plan_files = [PLAN_FILE]
+            if not plan_files:
+                print("[ORCH] Skipping iterate: multi-plan mode enabled but no plan artifacts found.")
+            else:
+                print(f"[ORCH] Multi-plan iterate enabled: {len(plan_files)} plans found")
+                for idx, pfile in enumerate(plan_files, start=1):
+                    try:
+                        plan_json = pfile.read_text(encoding="utf-8")
+                        PLAN_FILE.write_text(plan_json, encoding="utf-8")
+                    except Exception as exc:
+                        print(f"[ORCH] Failed to set active plan from {pfile}: {exc}")
+                        continue
+                    notes = _persona_phase_notes("run_iterate", {"plan_file": str(pfile.name)}, steps)
+                    if notes:
+                        log("iterate_notes", notes)
+                        _write_text(notes_dir / f"iterate_{idx}.txt", "\n\n".join(notes))
+                    t0 = time.time()
+                    env = {"LLM_STAGE": f"iterate_{idx}"}
+                    _run_mod("agents.iterate", env_overrides=env)
+                    stage_time[f"iterate_{idx}"] = time.time() - t0
+        elif PLAN_FILE.exists():
             notes = _persona_phase_notes("run_iterate", {}, steps)
             if notes:
                 log("iterate_notes", notes)
@@ -402,6 +489,8 @@ def main() -> None:
             t0 = time.time()
             _run_mod("agents.iterate")
             stage_time["iterate"] = time.time() - t0
+        else:
+            print("[ORCH] Skipping iterate: no plan artifacts found in data/plan.json or data/plans/.")
     else:
         print("[ORCH] Skipping iterate per config/env")
 
@@ -410,6 +499,21 @@ def main() -> None:
         summary = json.loads((RUNS / "summary.json").read_text(encoding="utf-8"))
     except Exception:
         summary = {}
+    # Optional result analysis before persona interpretation notes
+    try:
+        from lab.config import get_bool as _gb2
+        if _gb2("feedback.analysis.enable", _gb2("feedback.enable", False)):
+            print("[ORCH] Running result analyzer…")
+            try:
+                from agents.result_analyzer import analyze, write_outputs  # type: ignore
+                ins = analyze(summary)
+                write_outputs(ins)
+                # include insights in persona context if available
+                summary["_insights"] = ins
+            except Exception as _aexc:
+                print(f"[ORCH] Analyzer failed: {_aexc}")
+    except Exception:
+        pass
     notes = _persona_phase_notes("interpretation", {"summary": summary}, steps)
     if notes:
         log("interpret_notes", notes)

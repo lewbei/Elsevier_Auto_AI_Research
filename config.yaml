@@ -3,7 +3,7 @@
 
 project:
   # Only prompt override: the goal (domain-agnostic)
-  goal: "i want to do human pose classification using deep learning with few shot learning"
+  goal: "i want to do skin cancer classification using deep learning"
   # Optional explicit title (used in paper/report); leave empty to auto-generate
   title: ""
 
@@ -88,12 +88,12 @@ telemetry:
 pipeline:
   # Skip stages automatically without CLI or env flags
   skip:
-    find_papers: true
-    summaries: true
-    novelty: true
-    idea_blueprints: true
-    planner: true
-    iterate: true
+    find_papers: false
+    summaries: false
+    novelty: false
+    idea_blueprints: false
+    planner: false
+    iterate: false
     lit_review: false
     interactive: false
   # Number of iterate cycles (fallback to 2 if unset)
@@ -103,10 +103,10 @@ pipeline:
     personas:
       enable: false
   # Write paper draft at the end
-  write_paper: true
+  write_paper: false
   # Paper drafting options (LLM-enabled drafting)
   write_paper_llm:
-    enable: true   # enable LLM-based paper drafting
+    enable: false   # disable LLM-based paper drafting for test runs
     # model: ""    # optional explicit model; empty uses llm.default
     # Optional length/structure guidance
     min_words: 12000
@@ -211,6 +211,16 @@ pipeline:
       enable: true    # Optional REPLACE/EDIT training hooks generation
       llm: default
       model: ""
+    structured:
+      enable: true            # New structured JSON plan-based codegen
+      use_plan_requirements: true  # Derive objective/instructions from data/plan.json
+      auto_commit: false      # Only stage + patch by default
+      temperature: 0.2
+      deterministic:
+        seed: 1337
+      sandbox:
+        timeout: 45
+      branch_prefix: codegen
 
   # Idea blueprints agent
   idea_blueprints:
@@ -238,8 +248,8 @@ pipeline:
   find_papers:
     # If empty, the system uses project.goal as the base query.
     query: ""
-    page_size: 25
-    allowed_years: ["2024", "2025"]
+    page_size: 100
+    allowed_years: ["2023", "2024", "2025"]
     download_oa_only: true
     max_kept: 40
     backup: arxiv          # fallback: if Elsevier errors OR keeps 0 papers -> arXiv. Values: none | arxiv
@@ -254,17 +264,17 @@ pipeline:
       count: 4
       max_len: 120
     provider: arxiv        # auto | elsevier | arxiv — decide once at start; no per-query retries
-    arxiv:
-      categories: ["cs.CV", "eess.IV"]  # restrict to computer vision and image/video (optional)
+  arxiv:
+      categories: []  # empty -> search across all arXiv categories
       max_results_per_query: 10
     # Deterministic keyword-driven queries (recommended)
-    keywords: []           # optional explicit keywords; when empty, derived from goal + include_terms + synonyms
-    keyword_query:
-      enable: true
-      terms_per_query: 1
-      max_queries: 5
-      fields: ["ti", "abs"]  # which arXiv fields to search per term
-      simple: true              # when true, use plain keyword terms (no boolean/fields) for arXiv queries
+      keywords: []           # optional explicit keywords; when empty, derived from goal + include_terms + synonyms
+      keyword_query:
+        enable: true
+        terms_per_query: 1
+        max_queries: 5
+        fields: ["ti", "abs"]  # which arXiv fields to search per term
+        simple: true              # when true, use plain keyword terms (no boolean/fields) for arXiv queries
 
 # Tier‑1 validator (optional)
 tier1:

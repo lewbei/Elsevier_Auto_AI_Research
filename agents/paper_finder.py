@@ -5,14 +5,12 @@ import json
 import pathlib
 import requests
 from typing import Optional, Tuple, List
-from dotenv import load_dotenv
 from lab.config import get as cfg_get
 from utils.llm_utils import chat_json, LLMError
 
 # ---------------------------
 # ENV / CONSTANTS
 # ---------------------------
-load_dotenv()
 API_KEY = os.getenv("ELSEVIER_KEY")
 INSTTOKEN = os.getenv("X_ELS_INSTTOKEN")  # optional; only if you actually have one
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")  # legacy; relevance now uses main LLM provider
@@ -279,7 +277,37 @@ def _domain_keywords_from_goal(goal: str) -> List[str]:
         ]
     return kws
 
-def _normalize_keywords(goal: str, include_terms: List[str], synonyms: List[str], cfg_keywords: List[str]) -> List[str]:
+def _generate_llm_keywords(goal: str, *, count: int, max_len: int, model: str | None = None, profile: str | None = None) -> List[str]:
+    """Ask the active LLM for focused search keywords based on the project goal."""
+    if not goal:
+        return []
+    try:
+        payload = {
+            "goal": goal,
+            "count": max(1, count),
+            "max_len": max(8, max_len),
+            "format": "json",
+        }
+        system = (
+            "You generate concise search keywords for academic literature retrieval.\n"
+            "Return strictly JSON of the form {\"keywords\": [\"term\", ...]} with unique items.\n"
+            "Each keyword must stay under max_len characters, avoid stopwords alone, and remain specific to the goal."
+        )
+        js = chat_json(system, json.dumps(payload, ensure_ascii=False), temperature=0.0, model=model, profile=profile)
+    except LLMError:
+        return []
+    out: List[str] = []
+    for item in (js.get("keywords") or []):
+        term = str(item).strip()
+        if not term:
+            continue
+        out.append(term[:max_len])
+        if len(out) >= count:
+            break
+    return out
+
+
+def _normalize_keywords(goal: str, include_terms: List[str], synonyms: List[str], cfg_keywords: List[str], llm_keywords: List[str]) -> List[str]:
     """Build a unique, ordered keyword list from config + domain mapping; avoid low-signal tokens."""
     seen = set()
     out: List[str] = []
@@ -292,13 +320,16 @@ def _normalize_keywords(goal: str, include_terms: List[str], synonyms: List[str]
         if s in seen:
             return
         seen.add(s); out.append(s)
-    # 1) explicit keywords from config
+    # 1) explicit keywords from config (if any)
     for s in (cfg_keywords or []):
         add(s)
-    # 2) domain-mapped keywords from goal
+    # 2) LLM-proposed keywords (preferred path when config is empty)
+    for s in (llm_keywords or []):
+        add(s)
+    # 3) domain-mapped keywords from goal
     for s in _domain_keywords_from_goal(goal):
         add(s)
-    # 3) include_terms and synonyms
+    # 4) include_terms and synonyms
     for s in (include_terms or []) + (synonyms or []):
         add(s)
     # Do NOT add single tokens from goal to avoid noise like "want"
@@ -375,11 +406,26 @@ if __name__ == "__main__":
         kw_maxq = int(cfg_get("pipeline.find_papers.keyword_query.max_queries", 5) or 5)
         kw_fields = list(cfg_get("pipeline.find_papers.keyword_query.fields", ["ti","abs"]) or ["ti","abs"])  # type: ignore
         kw_list = list(cfg_get("pipeline.find_papers.keywords", []) or [])  # type: ignore
+        kw_llm_count = int(cfg_get("pipeline.find_papers.keyword_query.llm_count", max(5, kw_maxq)) or max(5, kw_maxq))
+        kw_llm_maxlen = int(cfg_get("pipeline.find_papers.keyword_query.llm_max_len", 60) or 60)
+        kw_llm_profile = str(cfg_get("pipeline.find_papers.keyword_query.llm_profile", "") or "").strip() or None
+        kw_llm_model = str(cfg_get("pipeline.find_papers.keyword_query.llm_model", "") or "").strip() or None
     except Exception:
         kw_enable, kw_terms, kw_maxq, kw_fields, kw_list = True, 4, 5, ["ti","abs"], []
+        kw_llm_count, kw_llm_maxlen = 8, 60
+        kw_llm_profile = kw_llm_model = None
     queries: List[str] = []
     # Build keywords first
-    kws = _normalize_keywords(project_goal, include_terms, synonyms, kw_list) if kw_enable else []
+    kw_llm: List[str] = []
+    if kw_enable and not kw_list:
+        kw_llm = _generate_llm_keywords(
+            project_goal,
+            count=kw_llm_count,
+            max_len=kw_llm_maxlen,
+            model=kw_llm_model,
+            profile=kw_llm_profile,
+        )
+    kws = _normalize_keywords(project_goal, include_terms, synonyms, kw_list, kw_llm) if kw_enable else []
     try:
         simple_kw = bool(cfg_get("pipeline.find_papers.keyword_query.simple", True)) if kw_enable else False
     except Exception:
@@ -429,7 +475,7 @@ if __name__ == "__main__":
     # Log keywords if keyword_query enabled
     try:
         if kw_enable:
-            kws_dbg = _normalize_keywords(project_goal, include_terms, synonyms, kw_list)
+            kws_dbg = _normalize_keywords(project_goal, include_terms, synonyms, kw_list, kw_llm)
             print(f"[KEYWORDS] {kws_dbg}")
     except Exception:
         pass
@@ -441,8 +487,10 @@ if __name__ == "__main__":
     # Persist the active query for audit
     try:
         _runs = pathlib.Path("runs"); _runs.mkdir(exist_ok=True)
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
         with (_runs / "find_papers_queries.txt").open("a", encoding="utf-8") as fh:
-            fh.write(time.strftime("%Y-%m-%d %H:%M:%S") + "\t" + query + "\n")
+            for q in queries:
+                fh.write(f"{ts}\t{q}\n")
     except Exception:
         pass
     try:

@@ -33,7 +33,7 @@ Downloads/
 downloads/
 data/
 *.log
-
+.pytest_cache
 # Papers / artifacts
 paper/*.pdf
 paper/*.aux

@@ -5,7 +5,6 @@ import time
 from typing import Any, Dict, List, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from dotenv import load_dotenv
 from utils.llm_utils import chat_json_cached, LLMError
 from lab.codegen_utils import write_generated_aug, write_generated_head
 from lab.codegen_llm import write_generated_aug_from_llm  # type: ignore
@@ -20,12 +19,21 @@ from lab.config import get, get_bool
 from lab.domain_templates import detect_domain, apply_template_defaults, prompt_block
 from lab.config import dataset_path_for, dataset_name, dataset_kind
 try:
+    # Optional monitoring (feedback loop)
+    from agents.experiment_monitor import get_monitor  # type: ignore
+except Exception:  # pragma: no cover
+    def get_monitor():  # type: ignore
+        class _Nop:
+            def start(self, *a, **k): return ""
+            def update(self, *a, **k): return None
+            def finalize(self, *a, **k): return None
+        return _Nop()
+try:
     from agents.personas import DialogueManager  # type: ignore
 except Exception:
     DialogueManager = None  # type: ignore
 
 
-load_dotenv()
 
 RUNS_DIR = pathlib.Path("runs")
 EXPERIMENTS_DIR = pathlib.Path("experiments")
@@ -403,6 +411,17 @@ def iterate(novelty: Dict[str, Any], max_iters: int = 2) -> None:
         _write_json(EXPERIMENTS_DIR / f"{run_id}_baseline.json", baseline)
         _write_json(EXPERIMENTS_DIR / f"{run_id}_novelty.json", novelty_spec)
         _write_json(EXPERIMENTS_DIR / f"{run_id}_ablation.json", ablation)
+        # Monitoring start (spec context limited to titles + core hparams for brevity)
+        try:
+            monitor = get_monitor()
+            if hasattr(monitor, 'start'):
+                compact_specs = [
+                    {k: s.get(k) for k in ["title", "lr", "max_train_steps", "input_size", "model"] if k in s}
+                    for s in [baseline, novelty_spec, ablation] if isinstance(s, dict)
+                ]
+                monitor.start(run_id, plan_context={"iter": it}, specs=compact_specs)
+        except Exception:
+            monitor = None  # type: ignore
         # Journal entry (append line)
         try:
             with open(journal, "a", encoding="utf-8") as jfh:
@@ -531,6 +550,29 @@ def iterate(novelty: Dict[str, Any], max_iters: int = 2) -> None:
                     extra.append((f"{base_name}_rep{i}", dict(base_spec)))
             matrix.extend(extra)
 
+        # Adaptive injection: consume pending monitor action -> decision -> adapted variants
+        try:
+            if monitor is not None and hasattr(monitor, 'should_adapt_plan') and monitor.should_adapt_plan():  # type: ignore
+                from agents.decision_engine import make_experiment_decision  # local import to avoid upfront cost
+                from agents.adaptive_planner import adapt_plan
+                action = monitor.next_action()  # type: ignore
+                trend = None  # could be extended to retrieve stored trend
+                decision_obj = make_experiment_decision(action or {}, trend)
+                if decision_obj:
+                    specs_map = {'baseline': baseline, 'novelty': novelty_spec, 'ablation': ablation}
+                    adapted_specs = adapt_plan(specs_map, decision_obj)
+                    injected: List[Tuple[str, Dict[str, Any]]] = []
+                    for idx, s in enumerate(adapted_specs, start=1):
+                        name = f"adapt_{idx}_{s.get('_adapted_from', {}).get('tag','var')}"
+                        injected.append((name, s))
+                    if injected:
+                        print(f"[ADAPT] Injecting {len(injected)} spec variants from decision {decision_obj['type']}")
+                        matrix.extend(injected)
+                if hasattr(monitor, 'clear_action'):
+                    monitor.clear_action()  # type: ignore
+        except Exception as exc:
+            print(f"[ADAPT-WARN] Failed adaptation injection: {exc}")
+
         # Cap total runs per iteration (ensure core triplet remains)
         try:
             max_runs = int(os.getenv("MAX_RUNS_PER_ITER", "0") or 0)
@@ -550,7 +592,36 @@ def iterate(novelty: Dict[str, Any], max_iters: int = 2) -> None:
         def _run_one(name_spec: Tuple[str, Dict[str, Any]]):
             name, spec = name_spec
             print(f"[RUN] {name} …")
-            res = run_experiment(spec)
+            # Heartbeat wrappers
+            def _on_progress(step: int, metrics: Dict[str, Any]):
+                try:
+                    if monitor is not None and hasattr(monitor, 'progress'):
+                        monitor.progress(run_id, name, step, metrics)
+                except Exception:
+                    pass
+            def _should_stop() -> bool:
+                try:
+                    if monitor is not None and hasattr(monitor, 'should_stop'):
+                        return bool(monitor.should_stop(run_id))  # type: ignore
+                except Exception:
+                    return False
+                return False
+            res = run_experiment(spec, on_progress=_on_progress, should_stop=_should_stop)
+            # Monitor update after each single run
+            try:
+                if monitor is not None and hasattr(monitor, 'update'):
+                    metrics = res if isinstance(res, dict) else {}
+                    monitor.update(run_id, name, metrics=metrics, step=it)
+            except Exception:
+                pass
+            # Early stop reason propagation (if any) attach to result meta
+            try:
+                if monitor is not None and hasattr(monitor, 'stop_reason'):
+                    reason = monitor.stop_reason()
+                    if reason and isinstance(res, dict):
+                        res.setdefault('monitor', {})['early_stop_reason'] = reason
+            except Exception:
+                pass
             return name, spec, res
 
         if parallel:
@@ -579,13 +650,12 @@ def iterate(novelty: Dict[str, Any], max_iters: int = 2) -> None:
                     print("[BUDGET] Time budget exceeded; stopping further runs in this iteration.")
                     break
         all_runs.extend(iter_results)
-
+        # Per‑iteration decision & optional reviewer stage
         decision = analyze_and_decide(iter_results, target_delta=0.005)
         _write_json(RUNS_DIR / run_id / "decision.json", decision)
         print(f"[DECISION] {decision}")
-        # Optional reviewer stage
         try:
-            enable_reviewer = get_bool("pipeline.reviewer.enable", False) or (str(os.getenv("REVIEWER_ENABLE", "")).lower() in {"1", "true", "yes"})
+            enable_reviewer = get_bool("pipeline.reviewer.enable", False) or (str(os.getenv("REVIEWER_ENABLE", "").lower()) in {"1", "true", "yes"})
         except Exception:
             enable_reviewer = False
         if enable_reviewer:
@@ -598,6 +668,7 @@ def iterate(novelty: Dict[str, Any], max_iters: int = 2) -> None:
         if decision.get("success"):
             goal_reached = True
             break
+    # After loop, 'decision' holds last iteration decision
 
     # Summary
     summary = {
@@ -607,6 +678,12 @@ def iterate(novelty: Dict[str, Any], max_iters: int = 2) -> None:
         "runs": all_runs,
     }
     _write_json(RUNS_DIR / "summary.json", summary)
+    # Finalize monitor for last iteration (single monitor instance used per iter)
+    try:
+        if 'monitor' in locals() and monitor is not None and hasattr(monitor, 'finalize'):
+            monitor.finalize(run_id)
+    except Exception:
+        pass
 
     # Persist best run for reporting
     try:

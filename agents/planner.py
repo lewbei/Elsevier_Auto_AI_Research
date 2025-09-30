@@ -7,7 +7,6 @@ import tempfile
 import shutil
 from datetime import datetime
 
-from dotenv import load_dotenv
 from utils.llm_utils import chat_json_cached, LLMError
 from utils.llm_utils import LLM_PROVIDER, LLM_MODEL
 from utils.llm_utils import LLM_CHAT_URL
@@ -1077,11 +1076,7 @@ def run_planning_session(novelty: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def main() -> None:
-    # Ensure environment variables are available
-    try:
-        load_dotenv()
-    except Exception:
-        pass
+    # Ensure environment variables are available (env-only; no .env loading)
     _ensure_dirs()
     if not REPORT_PATH.exists():
         print(f"[ERR] Missing novelty report at {REPORT_PATH}. Run agents.novelty first.")
@@ -1102,7 +1097,7 @@ def main() -> None:
             print(f"[PLANNER] Novelty report: themes={themes}, ideas={ideas}, research_q={rq}")
         except Exception:
             pass
-    plan = run_planning_session(novelty)
+        plan = run_planning_session(novelty)
     except Exception as exc:
         print(f"[ERR] Planning session failed without fallback: {exc}")
         return

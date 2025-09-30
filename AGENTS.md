@@ -1,75 +1,33 @@
-Agents Overview (Programmatic, No CLI)
+# Repository Guidelines
 
-Principles
-- No CLI, no argparse, no offline fallback. Use Python entrypoints directly.
-- Config via .env and optional YAML (config.yaml). YAML takes precedence; env vars override as needed.
-- Windows + Git‑Bash friendly; paths use pathlib; no shell dependencies required.
+## Project Structure & Module Organization
+- `agents/` contains the orchestrator and stage modules (summaries, novelty, planner, iterate, write, interactive); keep entrypoints importable and free from side effects.
+- `lab/` houses the experiment runner, pytest sandbox, and LLM-assisted code tools that support pipeline development.
+- `utils/` centralizes configuration, logging, and API helpers—extend these utilities before adding duplicate logic elsewhere.
+- Generated artifacts live in `data/`, `runs/`, `logs/`, and `paper/`; avoid committing heavyweight outputs unless they are intentionally versioned.
+- Support material and prototypes sit under `docs/`, `experiments/`, and `dev/`; promote stabilized code into `agents/` or `lab/` when it graduates.
 
-Environment
-- Keys: ELSEVIER_KEY (paper_finder), DEEPSEEK_API_KEY (LLM), optional X_ELS_INSTTOKEN.
-- Common toggles (YAML preferred, env optional):
-  - pipeline.skip.{find_papers|summaries|novelty|planner|iterate}
-  - pipeline.always_fresh, pipeline.max_iters
-  - pipeline.codegen.enable, pipeline.codegen.editor.enable
-  - dataset.{name|path|kind|splits|allow_fallback|allow_download}
-  - llm.{provider|model|default|custom|use}
+## Build, Test, and Development Commands
+- Define `PYTHON=/mnt/c/Users/lewka/miniconda3/envs/deep_learning/python.exe` and reuse it in commands.
+- `$PYTHON -m agents.orchestrator` runs the end-to-end pipeline using the active `config.yaml` and environment overrides.
+- Stage-level work: `$PYTHON -c "from agents.summarize import process_pdfs; process_pdfs('pdfs','data/summaries')"` (swap imports to call other stages).
+- `$PYTHON -m pytest -q` executes the suite; append paths such as `tests/agents` for targeted runs or `-k keyword` for filters.
 
-Config File
-- Place config.yaml at repo root (or set CONFIG_FILE). Example:
+## Coding Style & Naming Conventions
+- Follow PEP 8 with four-space indentation, expressive names, and type hints on public functions; prefer `pathlib.Path` and structured config accessors.
+- Expose callable functions instead of CLI wrappers or argparse; orchestration scripts should import and reuse pipeline logic directly.
+- Keep docstrings action-focused, describing key inputs, outputs, and side effects the pipeline depends on.
 
-  dataset:
-    name: isic
-    path: data/isic
-    kind: imagefolder
-  pipeline:
-    skip:
-      find_papers: true
-      novelty: false
-      planner: false
-      iterate: false
-    max_iters: 2
-    codegen:
-      enable: true
-      editor:
-        enable: false
+## Testing Guidelines
+- Place tests under `tests/`, mirroring package layout (`tests/agents/test_planner.py`, `tests/lab/test_sandbox.py`).
+- Keep cases deterministic and fast; use fixtures or lightweight sample files in `data/` rather than hitting external APIs.
+- Update `pytest.ini` only when discovery rules must change, and flag any slow or flaky tests in pull requests.
 
-Stage Contracts (Python Usage)
-- Summaries (agents/summarize.py)
-  - Function: process_pdfs(pdf_dir, out_dir, max_pages=0, max_chars=0, chunk_size=20000, timeout=60, max_tries=4, model=None, profile=None, verbose=True, skip_existing=True) -> int
-  - Input: PDFs under pdf_dir
-  - Output: JSON files under data/summaries/
+## Commit & Pull Request Guidelines
+- Write imperative, scope-first commit messages (e.g., `Enhance planner validation`), grouping related edits and summarizing behavioral impact.
+- Pull requests should cover intent, primary modules touched, config or schema updates, and attach relevant run artifacts or log excerpts.
+- Confirm tests or stage executions before review and note any skipped checks with justification.
 
-- Novelty (agents/novelty.py)
-  - Function: main() reads data/summaries/*.json, writes data/novelty_report.json
-  - Optional: persona discussion and facets mining (guarded by config)
-
-- Planner (agents/planner.py)
-  - Function: main() reads data/novelty_report.json, writes data/plan.json
-  - Strict JSON normalization and validation; logs a transcript under data/plan_session.jsonl
-
-- Iterate (agents/iterate.py)
-  - Function: iterate(novelty_dict, max_iters=2) performs baseline/novelty/ablation + variants
-  - Outputs: runs/summary.json, runs/best.json, runs/dashboard.html, accuracy.png
-
-- Interactive (agents/interactive.py) [optional]
-  - Function: main() uses personas + editor to synthesize training hooks and run small tests
-
-- Write Paper (agents/write_paper.py) [optional]
-  - Function: main() composes paper/paper.md and paper/main.tex from artifacts (LLM drafting optional)
-
-Programmatic Orchestration
-- Preferred: import agents.orchestrator and call main() to run staged pipeline with programmatic internals (no CLI behavior required).
-- Alternatively, call stages individually in your own script to customize control flow.
-
-Artifacts
-- PDFs: pdfs/
-- Summaries: data/summaries/
-- Novelty report: data/novelty_report.json
-- Plan: data/plan.json (+ data/plan_session.jsonl)
-- Runs + reports: runs/ (report.md, dashboard.html, best.json, summary.json)
-- Paper: paper/ (paper.md, main.tex)
-
-Notes
-- GPT‑5 family omits temperature by design (handled in utils/llm_utils).
-- No offline fallbacks are performed by default. If you need deterministic placeholders, add them explicitly behind opt-in flags.
-
+## Configuration & Security Tips
+- Manage defaults in root `config.yaml`, override via `.env`, and document environment changes reviewers need for reproducibility.
+- Guard API keys (`ELSEVIER_KEY`, `DEEPSEEK_API_KEY`, `X_ELS_INSTTOKEN`); never log raw secrets or commit proprietary outputs without redaction.

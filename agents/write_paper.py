@@ -13,12 +13,10 @@ import shutil
 import subprocess
 from typing import Any, Dict, List, Optional
 
-from dotenv import load_dotenv
 from lab.config import get, get_bool
 from utils.llm_utils import chat_text_cached, LLMError
 
 
-load_dotenv()
 
 DATA_DIR = pathlib.Path("data")
 RUNS_DIR = pathlib.Path("runs")

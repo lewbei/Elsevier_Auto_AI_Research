@@ -4,7 +4,6 @@ import time
 import os
 from typing import Any, Dict, List
 
-from dotenv import load_dotenv
 
 from lab.config import get, get_bool
 from lab.logging_utils import append_jsonl, is_verbose, vprint
@@ -18,7 +17,6 @@ except Exception:
     DialogueManager = None  # type: ignore
 
 
-load_dotenv()
 
 DATA_DIR = pathlib.Path("data")
 RUNS_DIR = pathlib.Path("runs")

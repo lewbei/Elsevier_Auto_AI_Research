@@ -3,12 +3,10 @@ import pathlib
 from typing import Any, Dict, List
 import os
 
-from dotenv import load_dotenv
 from lab.config import get, get_bool
 from utils.llm_utils import chat_json, LLMError
 
 
-load_dotenv()
 
 DATA_DIR = pathlib.Path("data")
 NOVELTY_PATH = DATA_DIR / "novelty_report.json"

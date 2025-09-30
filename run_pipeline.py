@@ -1,8 +1,33 @@
 import os
 import time
 from pathlib import Path
-from dotenv import load_dotenv
 from lab.logging_utils import get_log_level
+
+
+def _load_env_file(path: Path | None = None) -> None:
+    """Populate os.environ from a .env file when present.
+
+    Keeps existing values intact; only missing keys are set. Lines starting with
+    '#' are ignored, as are malformed entries. Simple KEY=VALUE format only.
+    """
+    env_path = path or (HERE / ".env")
+    if not env_path.exists():
+        return
+    try:
+        for raw in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            if not key or key in os.environ:
+                continue
+            val = value.strip().strip("'\"")
+            os.environ[key] = val
+    except Exception:
+        pass
 
 
 HERE = Path(__file__).parent.resolve()
@@ -65,11 +90,8 @@ def _aggregate_llm_usage(run_id: str) -> dict:
 
 
 def main() -> None:
-    # Load .env explicitly from repo root
-    try:
-        load_dotenv(HERE / ".env")
-    except Exception:
-        pass
+    # Load local .env for convenience (keys already present win).
+    _load_env_file()
     # Tag this pipeline run for LLM cost tracking
     run_id = time.strftime("run_%Y%m%d-%H%M%S")
     os.environ["LLM_RUN_ID"] = run_id

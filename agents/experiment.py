@@ -2,13 +2,11 @@ import json
 import pathlib
 from typing import Any, Dict
 
-from dotenv import load_dotenv
 from utils.llm_utils import chat_json, LLMError
 from lab.experiment_runner import run_experiment
 from lab.config import dataset_path_for, get
 
 
-load_dotenv()
 
 EXPERIMENTS_DIR = pathlib.Path("experiments")
 RUNS_DIR = pathlib.Path("runs")

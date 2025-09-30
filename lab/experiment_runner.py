@@ -42,7 +42,7 @@ def dataset_choice() -> str:
     return ds if ds in {"isic", "cifar10"} else "isic"
 
 
-def _run_real(spec: Dict[str, Any]) -> Dict[str, Any]:
+def _run_real(spec: Dict[str, Any], *, on_progress=None, should_stop=None) -> Dict[str, Any]:
     # Normalize/validate spec (optional dependency)
     try:
         from lab.spec_validation import normalize_spec as _normalize_spec
@@ -73,6 +73,11 @@ def _run_real(spec: Dict[str, Any]) -> Dict[str, Any]:
         from torchvision import transforms  # type: ignore
         from torchvision.datasets import ImageFolder  # type: ignore
         from torchvision.models import resnet18  # type: ignore
+        # GPU policy: no CPU fallback unless ALLOW_CPU_FOR_TESTS is set
+        if not os.getenv("ALLOW_CPU_FOR_TESTS"):
+            assert torch.cuda.is_available(), (
+                "no fallback: CUDA/GPU required. set ALLOW_CPU_FOR_TESTS=1 only for tests."
+            )
     except Exception as exc:  # pragma: no cover
         res = {
             "mode": "stub",
@@ -384,16 +389,34 @@ def _run_real(spec: Dict[str, Any]) -> Dict[str, Any]:
             torch.backends.cudnn.benchmark = False
     except Exception:
         pass
-    # Model selection (keep minimal)
-    model_name = str(spec.get("model") or "resnet18").lower()
-    if model_name == "resnet18":
-        model = resnet18(weights=None)
-    else:
-        model = resnet18(weights=None)
+    # Model selection via factory (supports resnet18 + simple_cnn + mutations)
+    from lab.model_factory import build_model  # lazy import
+    model, model_meta = build_model(spec, int(num_classes), task=task)
+    # Provide a unified interface for downstream head modification.
+    # For factory models that are torchvision resnet18, we assume attribute .fc exists.
+    # For simple_cnn (Sequential), final layer is model[-1]; we wrap access helpers.
+    is_sequential_head = False
+    try:
+        import torch.nn as _nn  # type: ignore
+        if hasattr(model, 'fc'):
+            base_out_dim = getattr(model.fc, 'out_features', None)
+        else:
+            # Attempt to detect last Linear in Sequential
+            if isinstance(model, _nn.Sequential) and len(model) >= 1 and isinstance(model[-1], _nn.Linear):  # type: ignore[index]
+                is_sequential_head = True
+                base_out_dim = model[-1].out_features  # type: ignore[index]
+            else:
+                base_out_dim = None
+    except Exception:
+        base_out_dim = None
     # Heads + losses per task
     if task == "regression":
         out_dim = int(spec.get("num_outputs", 1) or 1)
-        model.fc = nn.Linear(model.fc.in_features, out_dim)
+        if hasattr(model, 'fc'):
+            model.fc = nn.Linear(model.fc.in_features, out_dim)  # type: ignore[attr-defined]
+        elif is_sequential_head:
+            in_features = model[-1].in_features  # type: ignore[index]
+            model[-1] = nn.Linear(in_features, out_dim)  # type: ignore[index]
         # Optional loss override for regression
         loss_name = str(spec.get("loss") or "").strip().lower()
         if loss_name in {"l1", "mae"}:
@@ -410,19 +433,47 @@ def _run_real(spec: Dict[str, Any]) -> Dict[str, Any]:
                 if sanity_check_generated_head():
                     from lab.generated_head import GeneratedHead  # type: ignore
                     p = float(spec.get("dropout_p", 0.2))
-                    model.fc = GeneratedHead(model.fc.in_features, int(num_classes), p)
+                    if hasattr(model, 'fc'):
+                        model.fc = GeneratedHead(model.fc.in_features, int(num_classes), p)  # type: ignore[attr-defined]
+                    elif is_sequential_head:
+                        in_features = model[-1].in_features  # type: ignore[index]
+                        model[-1] = GeneratedHead(in_features, int(num_classes), p)  # type: ignore[index]
                 else:
-                    model.fc = nn.Linear(model.fc.in_features, int(num_classes))
+                    if hasattr(model, 'fc'):
+                        model.fc = nn.Linear(model.fc.in_features, int(num_classes))  # type: ignore[attr-defined]
+                    elif is_sequential_head:
+                        in_features = model[-1].in_features  # type: ignore[index]
+                        model[-1] = nn.Linear(in_features, int(num_classes))  # type: ignore[index]
             except Exception:
-                model.fc = nn.Linear(model.fc.in_features, int(num_classes))
+                if hasattr(model, 'fc'):
+                    model.fc = nn.Linear(model.fc.in_features, int(num_classes))  # type: ignore[attr-defined]
+                elif is_sequential_head:
+                    try:
+                        in_features = model[-1].in_features  # type: ignore[index]
+                        model[-1] = nn.Linear(in_features, int(num_classes))  # type: ignore[index]
+                    except Exception:
+                        pass
         else:
-            model.fc = nn.Linear(model.fc.in_features, int(num_classes))
+            if hasattr(model, 'fc'):
+                model.fc = nn.Linear(model.fc.in_features, int(num_classes))  # type: ignore[attr-defined]
+            elif is_sequential_head:
+                try:
+                    in_features = model[-1].in_features  # type: ignore[index]
+                    model[-1] = nn.Linear(in_features, int(num_classes))  # type: ignore[index]
+                except Exception:
+                    pass
         # Advanced hook may override head entirely
         if gtrain is not None and hasattr(gtrain, "build_model_head"):
             try:
-                head = gtrain.build_model_head(int(model.fc.in_features), int(num_classes))  # type: ignore[attr-defined]
-                if head is not None:
-                    model.fc = head
+                if hasattr(model, 'fc'):
+                    head = gtrain.build_model_head(int(model.fc.in_features), int(num_classes))  # type: ignore[attr-defined]
+                    if head is not None:
+                        model.fc = head
+                elif is_sequential_head:
+                    in_features = model[-1].in_features  # type: ignore[index]
+                    head = gtrain.build_model_head(int(in_features), int(num_classes))  # type: ignore[attr-defined]
+                    if head is not None:
+                        model[-1] = head  # type: ignore[index]
             except Exception:
                 pass
         # Optional loss override for classification
@@ -566,6 +617,24 @@ def _run_real(spec: Dict[str, Any]) -> Dict[str, Any]:
                     vprint(f"step={step} loss={float(loss.item()):.4f} lr={float(opt.param_groups[0].get('lr', 0.0)):.2e}")
                 except Exception:
                     vprint(f"step={step} loss={float(loss)}")
+            # Heartbeat callback (lightweight metrics snapshot)
+            if on_progress is not None:
+                try:
+                    on_progress(step, {
+                        'train_loss': float(loss.detach().item()) if hasattr(loss, 'item') else float(loss),
+                        'lr': float(opt.param_groups[0].get('lr', 0.0))
+                    })
+                except Exception:
+                    pass
+            # Cooperative early stop check (fine-grained)
+            if should_stop is not None:
+                try:
+                    if should_stop():
+                        if is_verbose():
+                            vprint("Early stop requested by monitor (in-step)")
+                        break
+                except Exception:
+                    pass
             if step >= max_train_steps:
                 break
         # Early stopping (epoch-level)
@@ -602,6 +671,28 @@ def _run_real(spec: Dict[str, Any]) -> Dict[str, Any]:
                     no_improve += 1
                 model.train()
                 if no_improve >= early_patience:
+                    break
+            except Exception:
+                pass
+        # Provide validation heartbeat at epoch end (val accuracy / regression metric)
+        if on_progress is not None:
+            try:
+                metric_name = 'val_accuracy'
+                metric_val = 0.0
+                if task == 'regression' and best_val is not None:
+                    metric_name = 'val_metric'
+                    metric_val = float(best_val)
+                elif task != 'regression' and best_val is not None:
+                    metric_val = float(best_val)
+                on_progress(step, {metric_name: metric_val})
+            except Exception:
+                pass
+        # Early stop after epoch
+        if should_stop is not None:
+            try:
+                if should_stop():
+                    if is_verbose():
+                        vprint("Early stop requested by monitor (post-epoch)")
                     break
             except Exception:
                 pass
@@ -725,21 +816,20 @@ def _run_real(spec: Dict[str, Any]) -> Dict[str, Any]:
     return res
 
 
-def run_experiment(spec: Dict[str, Any]) -> Dict[str, Any]:
+def run_experiment(spec: Dict[str, Any], *, on_progress=None, should_stop=None) -> Dict[str, Any]:
     """
     Try to run a minimal real experiment if torch+dataset present; otherwise return a stub
     result with explicit reason. This keeps the pipeline end-to-end even on limited setups.
     """
     try:
-        return _run_real(spec)
+        return _run_real(spec, on_progress=on_progress, should_stop=should_stop)
     except Exception as exc:  # pragma: no cover
-        res = {
+        if is_verbose():
+            vprint(f"Exception in real runner: {exc}")
+        return {
             "mode": "stub",
             "reason": f"Exception in real runner: {exc}",
             "started": _now(),
             "finished": _now(),
             "metrics": {"val_accuracy": 0.0},
         }
-        if is_verbose():
-            vprint(res["reason"])
-        return res
