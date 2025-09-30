@@ -308,14 +308,16 @@ Run the test suite:
 pytest tests/ -v
 ```
 
-Current test coverage includes:
+Current automated coverage stops at the planning stage:
 - Configuration management
 - Mutation generation
-- Stage management
+- Stage management (through `agents.planner`)
 - Prompt overrides
 - Paper generation
 - Security validation
 - Structured codegen schemas and idempotency registry
+
+Pipeline stages under `labs/` after planner (`iterate`, `codegen`, experimental runners) currently require manual testing.
 
 ## 📚 Documentation
 

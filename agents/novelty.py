@@ -131,7 +131,7 @@ def group_novelty_and_ideas(summaries: List[Dict[str, Any]], persona_notes: List
         "For NEW RESEARCH IDEAS, return BOTH a short list (new_ideas) AND a detailed, numbered list (new_ideas_detailed) with the following fields for each idea:\n"
         "id (1-based string), title (<=100 chars), novelty_kind [architecture|training_objective|data|evaluation|augmentation|optimizer|other], why_novel (<=240 chars), spec_hint (<=240 chars minimal actionable change), method (<=280 chars concrete method/recipe), risks (<=240 chars), eval_plan (list of <=6 short steps), compute_budget (<=60 chars).\n"
         "If YOLO/detection-related, include yolo fields inside method/spec_hint where appropriate (yolo_version, backbone, img_size, anchors, conf_thresh, iou_thresh, nms, task_adapt).\n"
-        "Avoid duplication across ideas; keep ideas feasible under tight budgets. Return strictly JSON.\n"
+        "Avoid duplication across ideas; ensure each proposal explains why it advances the state of the art. Return strictly JSON.\n"
         "Self-check: validate keys/types per output_schema; fix mismatches and return JSON only."
     )
     model = get("pipeline.novelty.model", None)
@@ -903,7 +903,7 @@ def _uniqueness_reflection(panel: Dict[str, Any], persona_notes: List[str] | Non
         }
     }
     system = (
-        "You are a novelty reviewer. Critique the ideas for originality and propose an improved list of 5–10 UNIQUE ideas that are clearly distinct, specific, and testable under tight budgets.\n"
+        "You are a novelty reviewer. Critique the ideas for originality and propose an improved list of 5–10 UNIQUE ideas that are clearly distinct, specific, and architecturally ambitious.\n"
         "Avoid generic augmentation/hparam tropes; prefer combinations, constraints-aware designs, or measurement/label innovations. Return JSON."
     )
     try:
@@ -1088,7 +1088,7 @@ def _critique_and_upgrade_ideas(
             },
         }
         system_lines = [
-            "You are a ruthless novelty director vetting research ideas under tight budgets.",
+            "You are a ruthless novelty director vetting research ideas for architectural impact.",
             "Use only the provided support evidence—no external assumptions.",
             "KEEP only when the idea clearly exceeds quality_cutoff, cites >=2 support titles, and includes >=3 numeric spec tokens.",
             "Novelty must focus on MODEL/architecture design (set novelty_kind='architecture').",
