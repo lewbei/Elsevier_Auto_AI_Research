@@ -3,9 +3,6 @@ import pathlib
 from typing import Any, Dict, List, Optional, Tuple, Union
 import os
 import re
-import tempfile
-import shutil
-from datetime import datetime
 
 from utils.llm_utils import chat_json_cached, LLMError
 from utils.llm_utils import LLM_PROVIDER, LLM_MODEL
@@ -13,6 +10,13 @@ from utils.llm_utils import LLM_CHAT_URL
 from lab.logging_utils import append_jsonl, is_verbose, vprint
 from lab.prompt_overrides import load_prompt
 from lab.config import dataset_name, dataset_path_for, get, get_bool
+from lab.plan_store import (
+    PLAN_PATH as ACTIVE_PLAN_PATH,
+    write_active_plan,
+    write_named_plan,
+    ensure_plan_dirs,
+)
+from agents.stage_manifest import DATA as DATA_DIR, NOVELTY_REPORT
 try:
     # Optional: multi‑persona advice to inform planning
     from agents.personas import DialogueManager  # type: ignore
@@ -20,16 +24,13 @@ except Exception:
     DialogueManager = None  # type: ignore
 
 
-DATA_DIR = pathlib.Path("data")
-REPORT_PATH = DATA_DIR / "novelty_report.json"
-PLAN_PATH = DATA_DIR / "plan.json"
+REPORT_PATH = NOVELTY_REPORT
 IDEAS_DIR = DATA_DIR / "ideas"
 BLUEPRINTS_PATH = IDEAS_DIR / "blueprints.json"
 
 
 def _ensure_dirs() -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    (DATA_DIR / "plans").mkdir(parents=True, exist_ok=True)
+    ensure_plan_dirs()
 
 # Optional dependency: jsonschema for strict validation
 try:
@@ -181,20 +182,6 @@ def _print_schema_errors(tag: str, obj: Any, schema: Dict[str, Any]) -> None:
             print(f"[SCHEMA] {tag}: failed to produce detailed diagnostics.")
         except Exception:
             pass
-
-
-def atomic_write_json(path: pathlib.Path, obj: Dict[str, Any]) -> None:
-    """Write JSON atomically with timestamped backup of previous file."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmpdir = pathlib.Path(tempfile.mkdtemp(prefix="plan_write_"))
-    tmppath = tmpdir / path.name
-    tmppath.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
-    if path.exists():
-        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-        backup = path.with_suffix(path.suffix + f".bak.{ts}")
-        shutil.copy2(path, backup)
-    shutil.move(str(tmppath), str(path))
-    shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 def _normalize_plan_shape(js: Dict[str, Any]) -> Dict[str, Any]:
@@ -1119,17 +1106,16 @@ def main() -> None:
         except Exception:
             bpc = []
         if bpc:
-            plans_dir = DATA_DIR / "plans"
             wrote_any = False
             for idx, cand in enumerate(bpc, start=1):
                 try:
                     p = build_plan(novelty, candidates_override=[cand])
-                    out_path = plans_dir / f"plan_{idx}.json"
-                    atomic_write_json(out_path, p)
+                    filename = f"plan_{idx}.json"
+                    out_path = write_named_plan(p, filename)
                     print(f"[DONE] Wrote plan for blueprint {idx} to {out_path}")
                     # For the first plan, also update plan.json for downstream tools
                     if idx == 1:
-                        atomic_write_json(PLAN_PATH, p)
+                        write_active_plan(p)
                     wrote_any = True
                 except Exception as exc:
                     print(f"[ERR] Failed to build/write plan for blueprint {idx}: {exc}")
@@ -1137,7 +1123,7 @@ def main() -> None:
                 return
     # Default single-plan behavior
     try:
-        atomic_write_json(PLAN_PATH, plan)
+        write_active_plan(plan)
     except Exception as exc:
         print(f"[ERR] Failed to write plan.json atomically: {exc}")
         return
@@ -1146,7 +1132,7 @@ def main() -> None:
             vprint("Plan: " + json.dumps(plan, ensure_ascii=False, indent=2))
         except Exception:
             pass
-    print(f"[DONE] Wrote plan to {PLAN_PATH}")
+    print(f"[DONE] Wrote plan to {ACTIVE_PLAN_PATH}")
 
 
 if __name__ == "__main__":

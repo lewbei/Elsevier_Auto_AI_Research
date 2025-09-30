@@ -5,24 +5,14 @@ import os
 from typing import Any, Dict, List
 
 
-from lab.config import get, get_bool
+from lab.config import get
 from lab.logging_utils import append_jsonl, is_verbose, vprint
 from lab.codegen_llm import write_generated_aug_from_llm  # type: ignore
 from lab.code_edit_loop import run_codegen_editor  # type: ignore
 from lab.experiment_runner import run_experiment
-
-try:
-    from agents.personas import DialogueManager  # type: ignore
-except Exception:
-    DialogueManager = None  # type: ignore
-
-
-
-DATA_DIR = pathlib.Path("data")
-RUNS_DIR = pathlib.Path("runs")
-NOVELTY_PATH = DATA_DIR / "novelty_report.json"
-PLAN_PATH = DATA_DIR / "plan.json"
-
+from lab.plan_store import PLAN_PATH as ACTIVE_PLAN_PATH, active_plan_exists, read_plan
+from agents.persona_support import gather_notes
+from agents.stage_manifest import DATA as DATA_DIR, RUNS as RUNS_DIR, NOVELTY_REPORT
 
 def _now_str() -> str:
     return time.strftime("%Y%m%d-%H%M%S", time.localtime())
@@ -40,50 +30,24 @@ def _ensure_dirs() -> None:
     DATA_DIR.mkdir(exist_ok=True)
 
 
-def _persona_notes(novelty: Dict[str, Any], plan: Dict[str, Any]) -> List[str]:
-    enable = get_bool("pipeline.interactive.personas.enable", False) or (
-        str(os.getenv("INTERACTIVE_PERSONAS", "")).lower() in {"1", "true", "yes"}
-    )
-    if not enable or DialogueManager is None:
-        return []
-    try:
-        dm = DialogueManager()
-        dm.post(
-            "User",
-            (
-                "We will generate tiny training hooks (transforms/head/spec tweaks) under tight compute.\n"
-                "Provide role-specific, concrete guidance: key transforms or head tweaks to try first, safe ranges (lr/steps), and quick validation checks."
-            ),
-        )
-        ctx = json.dumps({"novelty": novelty, "plan": plan}, ensure_ascii=False)
-        dm.post("User", f"Context: {ctx}")
-        notes: List[str] = []
-        for role in ["PhD", "Professor", "SW", "ML"]:
-            r = dm.step_role(role, prompt="Give 3 short actionable bullets to guide code updates. Be concrete and within constraints.")
-            notes.append(f"[{role}] {r.get('text','')}")
-        return notes
-    except Exception:
-        return []
-
-
 def main() -> None:
     _ensure_dirs()
-    if not NOVELTY_PATH.exists():
-        print(f"[SKIP] Interactive: missing novelty report at {NOVELTY_PATH}")
+    if not NOVELTY_REPORT.exists():
+        print(f"[SKIP] Interactive: missing novelty report at {NOVELTY_REPORT}")
         return
 
-    novelty = _load_json(NOVELTY_PATH)
-    plan = _load_json(PLAN_PATH) if PLAN_PATH.exists() else {}
+    novelty = _load_json(NOVELTY_REPORT)
+    plan = {}
+    if active_plan_exists():
+        try:
+            plan = read_plan(ACTIVE_PLAN_PATH)
+        except Exception:
+            plan = {}
 
     run_id = f"interactive_{_now_str()}"
     out_dir = RUNS_DIR / run_id
     out_dir.mkdir(parents=True, exist_ok=True)
     session_log = DATA_DIR / "interactive_session.jsonl"
-
-    # Persona advice (optional)
-    notes = _persona_notes(novelty, plan)
-    if notes:
-        append_jsonl(session_log, {"role": "Personas", "content": notes})
 
     # Novelty description for codegen
     desc = ""
@@ -103,6 +67,16 @@ def main() -> None:
     # Interactive code loop settings
     steps = int(get("pipeline.interactive.max_steps", 2) or 2)
     target_delta = float(get("pipeline.interactive.target_delta", 0.005) or 0.005)
+
+    notes = gather_notes(
+        "interactive",
+        {"novelty": novelty, "plan": plan},
+        steps=2,
+        config_key="pipeline.interactive.personas.enable",
+        env_name="INTERACTIVE_PERSONAS",
+    )
+    if notes:
+        append_jsonl(session_log, {"role": "Personas", "content": notes})
 
     context = {
         "plan": plan,

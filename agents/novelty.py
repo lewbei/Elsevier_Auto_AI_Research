@@ -1,6 +1,7 @@
 import os
 import json
 import pathlib
+import time
 from typing import Dict, Any, List, Tuple
 
 from utils.llm_utils import chat_json, LLMError, LLM_PROVIDER, LLM_MODEL
@@ -28,6 +29,7 @@ NOVELTY_SESSION = NOVELTY_DIR / "novelty_session.jsonl"
 NOVELTY_TRANSCRIPT = NOVELTY_DIR / "novelty_transcript.md"
 NOVELTY_UNIQ_JSON = NOVELTY_DIR / "novelty_uniqueness.json"
 NOVELTY_UNIQ_TRANSCRIPT = NOVELTY_DIR / "novelty_uniqueness.md"
+NOVELTY_IDEA_CRITIQUES = NOVELTY_DIR / "idea_critiques.jsonl"
 
 
 def _ensure_dirs() -> None:
@@ -132,37 +134,83 @@ def group_novelty_and_ideas(summaries: List[Dict[str, Any]], persona_notes: List
         "Avoid duplication across ideas; keep ideas feasible under tight budgets. Return strictly JSON.\n"
         "Self-check: validate keys/types per output_schema; fix mismatches and return JSON only."
     )
-    user_payload = {
-        "papers": items,
-        # Optional extra guidance from multi‑persona discussion (if enabled)
-        "persona_notes": list(persona_notes or []),
-        "output_schema": {
-            "themes": [
-                {
-                    "name": "string",
-                    "summary": "string",
-                    "representative_papers": ["string"],
-                }
-            ],
-            "new_ideas": ["string"],
-            "new_ideas_detailed": [
-                {
-                    "id": "string",
-                    "title": "string",
-                    "novelty_kind": "string",
-                    "why_novel": "string",
-                    "spec_hint": "string",
-                    "method": "string",
-                    "risks": "string",
-                    "eval_plan": ["string"],
-                    "compute_budget": "string"
-                }
-            ]
-        }
-    }
     model = get("pipeline.novelty.model", None)
     profile = get("pipeline.novelty.llm", None)
-    js = chat_json(system, json.dumps(user_payload, ensure_ascii=False), temperature=0.2, model=model, profile=profile)
+    max_tries = int(get("pipeline.novelty.retries", 3) or 3)
+    max_attempts = int(get("pipeline.novelty.max_attempts", 3) or 3)
+    min_ideas = int(get("pipeline.novelty.min_ideas", 3) or 3)
+
+    attempt_feedback: List[str] = []
+    js: Dict[str, Any] = {}
+    for attempt in range(1, max_attempts + 1):
+        augmented_payload = {
+            "papers": items,
+            "persona_notes": list(persona_notes or []),
+            "attempt": attempt,
+            "feedback": attempt_feedback,
+            "output_schema": {
+                "themes": [
+                    {
+                        "name": "string",
+                        "summary": "string",
+                        "representative_papers": ["string"],
+                    }
+                ],
+                "new_ideas": ["string"],
+                "new_ideas_detailed": [
+                    {
+                        "id": "string",
+                        "title": "string",
+                        "novelty_kind": "string",
+                        "why_novel": "string",
+                        "spec_hint": "string",
+                        "method": "string",
+                        "risks": "string",
+                        "eval_plan": ["string"],
+                        "compute_budget": "string"
+                    }
+                ]
+            }
+        }
+
+        tries = 0
+        while True:
+            tries += 1
+            try:
+                js = chat_json(
+                    system,
+                    json.dumps(augmented_payload, ensure_ascii=False),
+                    temperature=0.2,
+                    model=model,
+                    profile=profile,
+                )
+                break
+            except LLMError as exc:
+                if tries >= max_tries:
+                    if attempt >= max_attempts:
+                        print(f"[ERR] LLM group discussion failed after {tries} tries (attempt {attempt}/{max_attempts}): {exc}")
+                        return {"themes": [], "new_ideas": [], "new_ideas_detailed": []}
+                    wait = min(15 * tries, 60)
+                    print(f"[WARN] LLM novelty synthesis failed (attempt {attempt}/{max_attempts}, try {tries}/{max_tries}): {exc}. Retrying in {wait}s…")
+                    time.sleep(wait)
+                    break  # break inner loop to reattempt outer payload if retries exhausted
+                wait = min(15 * tries, 60)
+                print(f"[WARN] LLM novelty synthesis failed (try {tries}/{max_tries}): {exc}. Waiting {wait}s before retry…")
+                time.sleep(wait)
+                continue
+        else:
+            continue
+
+        themes = js.get("themes") or []
+        ideas = js.get("new_ideas_detailed") or []
+        if isinstance(ideas, list) and len(ideas) >= min_ideas:
+            break
+        attempt_feedback.append(
+            f"Attempt {attempt} returned {len(ideas) if isinstance(ideas, list) else 0} detailed ideas; need at least {min_ideas}. Increase diversity and novelty."\
+        )
+        time.sleep(min(10 * attempt, 45))
+    else:
+        return {"themes": [], "new_ideas": [], "new_ideas_detailed": []}
     # light shape enforcement
     themes = js.get("themes") or []
     if not isinstance(themes, list):
@@ -234,24 +282,35 @@ def group_novelty_and_ideas_v2(
         })
 
     goal = str(get("project.goal", "your goal") or "your goal")
+    backbones = [str(b) for b in (facets or {}).get("backbones", []) if str(b)] if facets else []
+    datasets_facets = [str(d) for d in (facets or {}).get("datasets", []) if str(d)] if facets else []
+    metrics_facets = [str(m) for m in (facets or {}).get("metrics", []) if str(m)] if facets else []
+    backbone_hint = f"Use model families from: {', '.join(backbones[:6])}." if backbones else "Use model families mentioned in the supplied papers."
+    dataset_hint = f"Datasets should come from: {', '.join(datasets_facets[:6])}." if datasets_facets else "Datasets must be drawn from the provided papers."
+    metric_hint = f"Metrics should come from: {', '.join(metrics_facets[:6])}." if metrics_facets else "Metrics must be drawn from the provided papers."
     facet_block = json.dumps(facets or {}, ensure_ascii=False)
-    system = (
-        "You are a meticulous panel moderator coordinating multiple expert personas to synthesize novelty across papers.\n"
-        "STRICT GROUNDING:\n"
-        "- Use ONLY backbones/operators/datasets that appear in facets.backbones/ops/datasets OR that appear in related_methods from summaries. Do not invent generic backbones.\n"
-        "- Every idea MUST include: derived_from_titles (>=2), delta_vs_prior (<=240 chars citing those titles), AND >=3 numeric spec tokens (e.g., img_size=640, lr=3e-4, iou_thresh=0.6).\n"
-        "- Avoid generic augmentation-only or hparam-only tweaks unless justified as non-trivial.\n"
-        "- If detection/YOLO, include yolo_version, backbone, img_size, anchors, conf_thresh, iou_thresh, nms, task_adapt in method/spec_hint.\n"
-        "- Tag each idea with domain_tags (e.g., ['derm','lung','retina'] or ['generic']) and task_tags (e.g., ['segmentation','classification','detection']).\n"
-        "Tasks: (a) robustly CLUSTER into 3–6 THEMES; (b) write a compact SUMMARY per theme with divergences/caveats and 2–4 representative paper titles; (c) propose 5–8 NEW RESEARCH IDEAS.\n"
-        "Return strictly JSON and self-validate against the output_schema."
-    )
+    system_lines = [
+        "You are a meticulous panel moderator coordinating multiple expert personas to synthesize novelty across papers.",
+        "STRICT GROUNDING:",
+        "- Use ONLY backbones/operators/datasets that appear in facets.backbones/ops/datasets OR that appear in related_methods from summaries. Do not invent generic backbones.",
+        "- Every idea MUST include: derived_from_titles (>=2), delta_vs_prior (<=240 chars citing those titles), AND >=3 numeric spec tokens (e.g., img_size=640, lr=3e-4, iou_thresh=0.6).",
+        "- The novelty must focus on MODEL/architecture innovations (set novelty_kind='architecture'); avoid purely optimization- or data-only tweaks.",
+        f"- {backbone_hint}",
+        f"- {dataset_hint}",
+        f"- {metric_hint}",
+        "- Avoid generic augmentation-only or hparam-only tweaks unless justified as non-trivial.",
+        "- If detection/YOLO, include yolo_version, backbone, img_size, anchors, conf_thresh, iou_thresh, nms, task_adapt in method/spec_hint.",
+        "- Tag each idea with domain_tags (e.g., ['derm','lung','retina'] or ['generic']) and task_tags (e.g., ['segmentation','classification','detection']).",
+        "Tasks: (a) robustly CLUSTER into 3–6 THEMES; (b) write a compact SUMMARY per theme with divergences/caveats and 2–4 representative paper titles; (c) propose 5–8 NEW RESEARCH IDEAS.",
+        "Return strictly JSON and self-validate against the output_schema.",
+    ]
+    system = "\n".join(line for line in system_lines if line)
 
     user_payload = {
         "papers": items,
         "persona_notes": list(persona_notes or []),
         "facets": json.loads(facet_block),
-    "output_schema": {
+        "output_schema": {
             "themes": [{"name": "string", "summary": "string", "representative_papers": ["string"]}],
             "new_ideas": ["string"],
             "new_ideas_detailed": [
@@ -267,8 +326,8 @@ def group_novelty_and_ideas_v2(
                     "compute_budget": "string",
                     "derived_from_titles": ["string"],
                     "delta_vs_prior": "string",
-            "domain_tags": ["string"],
-            "task_tags": ["string"],
+                    "domain_tags": ["string"],
+                    "task_tags": ["string"],
                 }
             ],
         },
@@ -321,7 +380,7 @@ def group_novelty_and_ideas_v2(
         dft = {
             "id": str(item.get("id") or idx),
             "title": str(item.get("title") or "").strip(),
-            "novelty_kind": str(item.get("novelty_kind") or "").strip(),
+            "novelty_kind": "architecture",
             "why_novel": str(item.get("why_novel") or "").strip(),
             "spec_hint": str(item.get("spec_hint") or "").strip(),
             "method": str(item.get("method") or "").strip(),
@@ -373,8 +432,9 @@ def group_novelty_and_ideas_v2(
             abl_terms = ["ablation", "sweep", "off", "tau", "sigma", "dropout", "without"]
             ablation_hits = sum(term in eval_plan.lower() for term in abl_terms)
             s["ablation"] = min(1.0, 0.5 + 0.25 * ablation_hits) if ablation_hits else 0.0
-            budget = (it.get("compute_budget", "") + " " + it.get("spec_hint", "")).lower()
-            s["compute"] = 1.0 if any(x in budget for x in ["<=100", "100 steps", "1 epoch", "single gpu"]) else (0.5 if "gpu" in budget else 0.0)
+            budget = (it.get("compute_budget", "") + " " + it.get("spec_hint", "") + " " + it.get("method", "")).lower()
+            model_terms = ["transformer", "backbone", "convnext", "swin", "vision transformer", "vit", "architecture", "cnn"]
+            s["compute"] = 1.0 if any(term in budget for term in model_terms) else (0.5 if "model" in budget else 0.0)
             spec_txt = (it.get("spec_hint", "") + " " + it.get("method", "")).lower()
             domain_words = ["isic", "derm", "skin", "retina", "lidc", "lung", "chestxray", "nih-chest"]
             s["general"] = 1.0 if not any(dw in spec_txt for dw in domain_words) else 0.4
@@ -882,11 +942,290 @@ def _uniqueness_reflection(panel: Dict[str, Any], persona_notes: List[str] | Non
     return {"unique_ideas": u, "critique": c}
 
 
-    
+def _normalize_idea_fields(
+    original: Dict[str, Any],
+    updates: Dict[str, Any] | None,
+    *,
+    fallback_id: str,
+) -> Dict[str, Any]:
+    merged = dict(original)
+    if isinstance(updates, dict):
+        for key, value in updates.items():
+            if value is None:
+                continue
+            if isinstance(value, list):
+                merged[key] = [str(v).strip() for v in value if str(v).strip()]
+            elif isinstance(value, dict):
+                merged[key] = value
+            else:
+                merged[key] = str(value).strip()
+    if not str(merged.get("id", "")).strip():
+        merged["id"] = str(fallback_id)
+    for key in [
+        "title",
+        "novelty_kind",
+        "why_novel",
+        "spec_hint",
+        "method",
+        "risks",
+        "delta_vs_prior",
+        "compute_budget",
+    ]:
+        merged[key] = str(merged.get(key, "") or "").strip()
+    for key in ["eval_plan", "derived_from_titles", "domain_tags", "task_tags"]:
+        vals = merged.get(key)
+        if isinstance(vals, list):
+            norm = [str(v).strip() for v in vals if str(v).strip()]
+        elif vals in (None, ""):
+            norm = []
+        else:
+            norm = [str(vals).strip()]
+        merged[key] = norm
+    try:
+        merged["tier1_score"] = float(merged.get("tier1_score", original.get("tier1_score", 0.0)) or 0.0)
+    except Exception:
+        merged["tier1_score"] = float(original.get("tier1_score", 0.0) or 0.0)
+    try:
+        merged["dup_sim"] = float(merged.get("dup_sim", original.get("dup_sim", 0.0)) or 0.0)
+    except Exception:
+        merged["dup_sim"] = float(original.get("dup_sim", 0.0) or 0.0)
+    return merged
+
+
+def _critique_and_upgrade_ideas(
+    panel: Dict[str, Any],
+    summary_objs: List[Dict[str, Any]],
+    *,
+    facets: Dict[str, Any] | None = None,
+    persona_notes: List[str] | None = None,
+) -> Dict[str, Any]:
+    ideas = list(panel.get("new_ideas_detailed") or [])
+    if not ideas:
+        return panel
+    facets = facets or {}
+    persona_notes = persona_notes or []
+    try:
+        NOVELTY_IDEA_CRITIQUES.unlink(missing_ok=True)
+    except Exception:
+        pass
+    goal = str(get("project.goal", "your goal") or "your goal")
+    allowed_models: List[str] = []
+    if facets:
+        allowed_models.extend([str(b) for b in facets.get("backbones", []) if str(b)])
+    try:
+        quality_cutoff = float(get("pipeline.novelty.quality_cutoff", 0.68) or 0.68)
+    except Exception:
+        quality_cutoff = 0.68
+    try:
+        min_ideas = int(get("pipeline.novelty.min_ideas", 3) or 3)
+    except Exception:
+        min_ideas = 3
+    model = get("pipeline.novelty.model", None)
+    profile = get("pipeline.novelty.llm", None)
+
+    title_index: Dict[str, Dict[str, Any]] = {}
+    for summary in summary_objs:
+        try:
+            title = str(summary.get("title") or "").strip()
+            if title:
+                title_index[title.lower()] = summary
+                allowed_models.extend([str(m) for m in summary.get("methods", []) if str(m)])
+        except Exception:
+            continue
+    allowed_models = sorted({m for m in allowed_models if m})
+
+    review_summaries: List[Dict[str, Any]] = []
+    upgraded: List[Dict[str, Any]] = []
+    for idx, idea in enumerate(ideas, start=1):
+        support: List[Dict[str, Any]] = []
+        support_methods: List[str] = []
+        support_datasets: List[str] = []
+        for title in idea.get("derived_from_titles") or []:
+            key = str(title or "").strip().lower()
+            if not key:
+                continue
+            match = title_index.get(key)
+            if match:
+                support.append({
+                    "title": match.get("title", ""),
+                    "novelty_claims": match.get("novelty_claims") or [],
+                    "methods": match.get("methods") or [],
+                    "limitations": match.get("limitations") or [],
+                    "datasets": match.get("datasets") or [],
+                })
+                support_methods.extend([str(m) for m in match.get("methods") or [] if str(m)])
+                support_datasets.extend([str(d) for d in match.get("datasets") or [] if str(d)])
+        payload = {
+            "goal": goal,
+            "quality_cutoff": quality_cutoff,
+            "idea": idea,
+            "score_estimate": float(idea.get("tier1_score", 0.0) or 0.0),
+            "dup_sim": float(idea.get("dup_sim", 0.0) or 0.0),
+            "persona_notes": persona_notes,
+            "facets": facets,
+            "support": support,
+            "allowed_models": sorted({m for m in (allowed_models + support_methods) if m}),
+            "allowed_datasets": sorted({d for d in support_datasets if d}),
+            "output_schema": {
+                "decision": "keep|revise|drop",
+                "headline": "string",
+                "rationale": ["string"],
+                "improvements": ["string"],
+                "upgraded_idea": {
+                    "title": "string",
+                    "novelty_kind": "string",
+                    "why_novel": "string",
+                    "spec_hint": "string",
+                    "method": "string",
+                    "risks": "string",
+                    "eval_plan": ["string"],
+                    "compute_budget": "string",
+                    "derived_from_titles": ["string"],
+                    "delta_vs_prior": "string",
+                    "domain_tags": ["string"],
+                    "task_tags": ["string"],
+                },
+            },
+        }
+        system_lines = [
+            "You are a ruthless novelty director vetting research ideas under tight budgets.",
+            "Use only the provided support evidence—no external assumptions.",
+            "KEEP only when the idea clearly exceeds quality_cutoff, cites >=2 support titles, and includes >=3 numeric spec tokens.",
+            "Novelty must focus on MODEL/architecture design (set novelty_kind='architecture').",
+        ]
+        allowed_models_line = sorted({m for m in (allowed_models + support_methods) if m})
+        if allowed_models_line:
+            system_lines.append(f"Use model families drawn from these sources: {', '.join(allowed_models_line[:8])}.")
+        allowed_datasets_line = sorted({d for d in support_datasets if d})
+        if allowed_datasets_line:
+            system_lines.append(f"Datasets must come from cited papers: {', '.join(allowed_datasets_line[:8])}.")
+        system_lines.extend([
+            "Otherwise choose REVISE and return an upgraded_idea sharpening novelty, grounding, and specs.",
+            "Use DROP only if the idea is untenable AND you provide an upgraded_idea replacement.",
+            "Return JSON matching output_schema exactly.",
+        ])
+        system = "\n".join(system_lines)
+        try:
+            review = chat_json(system, json.dumps(payload, ensure_ascii=False), temperature=0.0, model=model, profile=profile)
+        except LLMError as exc:
+            notes = [f"LLM critique failed: {exc}"]
+            idea_copy = dict(idea)
+            idea_copy["idea_review"] = {
+                "decision": "error",
+                "headline": "critique error",
+                "notes": notes,
+                "improvements": [],
+                "quality_cutoff": quality_cutoff,
+            }
+            upgraded.append(idea_copy)
+            append_jsonl(NOVELTY_IDEA_CRITIQUES, {
+                "idea_index": idx,
+                "status": "error",
+                "error": str(exc),
+                "idea": idea,
+            })
+            review_summaries.append({
+                "id": idea_copy.get("id"),
+                "decision": "error",
+                "score": float(idea.get("tier1_score", 0.0) or 0.0),
+                "dup_sim": float(idea.get("dup_sim", 0.0) or 0.0),
+                "headline": "critique error",
+                "notes": notes,
+            })
+            continue
+
+        decision = str(review.get("decision") or "").strip().lower()
+        if decision not in {"keep", "revise", "drop", "upgrade", "replace"}:
+            decision = "revise" if float(idea.get("tier1_score", 0.0) or 0.0) < quality_cutoff else "keep"
+        notes = review.get("rationale") or review.get("critique") or []
+        if isinstance(notes, str):
+            notes = [notes]
+        improvements = review.get("improvements") or []
+        if isinstance(improvements, str):
+            improvements = [improvements]
+        updated_payload = review.get("upgraded_idea") if isinstance(review.get("upgraded_idea"), dict) else None
+        if decision == "drop" and updated_payload is None:
+            decision = "revise"
+
+        merged = _normalize_idea_fields(
+            idea,
+            updated_payload,
+            fallback_id=str(idea.get("id") or idx),
+        )
+        merged["novelty_kind"] = "architecture"
+        if allowed_models:
+            method_lower = merged.get("method", "").lower()
+            if not any(am.lower() in method_lower for am in allowed_models):
+                merged["method"] = (allowed_models[0] + "-based architecture: " + merged.get("method", "")).strip()
+        merged["idea_review"] = {
+            "decision": decision,
+            "headline": str(review.get("headline") or ""),
+            "notes": [str(n) for n in notes if str(n).strip()],
+            "improvements": [str(n) for n in improvements if str(n).strip()],
+            "quality_cutoff": quality_cutoff,
+        }
+        upgraded.append(merged)
+        append_jsonl(NOVELTY_IDEA_CRITIQUES, {
+            "idea_index": idx,
+            "decision": decision,
+            "score_before": float(idea.get("tier1_score", 0.0) or 0.0),
+            "dup_sim": float(idea.get("dup_sim", 0.0) or 0.0),
+            "review": review,
+            "final_idea": merged,
+        })
+        review_summaries.append({
+            "id": merged.get("id"),
+            "decision": decision,
+            "score": float(idea.get("tier1_score", 0.0) or 0.0),
+            "dup_sim": float(idea.get("dup_sim", 0.0) or 0.0),
+            "headline": merged["idea_review"].get("headline", ""),
+            "notes": merged["idea_review"].get("notes", [])[:3],
+        })
+
+    existing_ids = {str(it.get("id")) for it in upgraded}
+    if len(upgraded) < min_ideas:
+        fallback = sorted(
+            ideas,
+            key=lambda it: float(it.get("tier1_score", 0.0) or 0.0),
+            reverse=True,
+        )
+        for item in fallback:
+            if len(upgraded) >= min_ideas:
+                break
+            iid = str(item.get("id") or len(upgraded) + 1)
+            if iid in existing_ids:
+                continue
+            copy_item = dict(item)
+            copy_item["idea_review"] = {
+                "decision": "fallback",
+                "headline": "added to satisfy min_ideas",
+                "notes": [],
+                "improvements": [],
+                "quality_cutoff": quality_cutoff,
+            }
+            upgraded.append(copy_item)
+            existing_ids.add(iid)
+            review_summaries.append({
+                "id": copy_item.get("id"),
+                "decision": "fallback",
+                "score": float(item.get("tier1_score", 0.0) or 0.0),
+                "dup_sim": float(item.get("dup_sim", 0.0) or 0.0),
+                "headline": "added to satisfy min_ideas",
+                "notes": [],
+            })
+
+    panel["new_ideas_detailed"] = upgraded
+    panel["new_ideas"] = [it.get("title", "") for it in upgraded]
+    panel["idea_reviews"] = review_summaries
+    return panel
 
 
 def main() -> None:
     _ensure_dirs()
+    try:
+        NOVELTY_IDEA_CRITIQUES.unlink(missing_ok=True)
+    except Exception:
+        pass
     # Progress printing control (default ON unless explicitly disabled)
     try:
         _progress = True
@@ -1049,6 +1388,45 @@ def main() -> None:
                 pass
     except Exception:
         pass
+
+    try:
+        panel = _critique_and_upgrade_ideas(
+            panel,
+            [s["summary"] for s in summaries],
+            facets=facets,
+            persona_notes=persona_notes,
+        )
+        if _progress:
+            try:
+                decision_counts: Dict[str, int] = {}
+                for entry in panel.get("idea_reviews", []) or []:
+                    key = str(entry.get("decision") or "unknown").strip() or "unknown"
+                    decision_counts[key] = decision_counts.get(key, 0) + 1
+                if decision_counts:
+                    stats_line = ", ".join(f"{k}={v}" for k, v in sorted(decision_counts.items()))
+                    print(f"[NOVELTY] Idea critique decisions: {stats_line}")
+            except Exception:
+                pass
+        try:
+            _before = len(panel.get("new_ideas_detailed") or [])
+            panel = score_and_filter_ideas(panel, facets)
+            kept_ids = {str(it.get("id")) for it in panel.get("new_ideas_detailed") or []}
+            panel["idea_reviews"] = [
+                entry for entry in (panel.get("idea_reviews") or [])
+                if str(entry.get("id")) in kept_ids
+            ]
+            _after = len(panel.get("new_ideas_detailed") or [])
+            if _progress:
+                try:
+                    print(f"[NOVELTY] Ideas kept post-critique: {_after}/{_before}")
+                    if _after == 0:
+                        print("[NOVELTY] No ideas remain after critique scoring (no fallback enabled)")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    except Exception as exc:
+        print(f"[WARN] Idea critique stage failed: {exc}")
 
     # Research outline and citations
     try:

@@ -18,6 +18,9 @@ from lab.analysis import write_analysis_files
 from lab.config import get, get_bool
 from lab.domain_templates import detect_domain, apply_template_defaults, prompt_block
 from lab.config import dataset_path_for, dataset_name, dataset_kind
+from lab.plan_store import PLAN_PATH as ACTIVE_PLAN_PATH, active_plan_exists, read_plan
+from agents.persona_support import gather_notes
+from agents.stage_manifest import RUNS as RUNS_DIR, ROOT as ROOT_DIR, NOVELTY_REPORT
 try:
     # Optional monitoring (feedback loop)
     from agents.experiment_monitor import get_monitor  # type: ignore
@@ -28,18 +31,7 @@ except Exception:  # pragma: no cover
             def update(self, *a, **k): return None
             def finalize(self, *a, **k): return None
         return _Nop()
-try:
-    from agents.personas import DialogueManager  # type: ignore
-except Exception:
-    DialogueManager = None  # type: ignore
-
-
-
-RUNS_DIR = pathlib.Path("runs")
-EXPERIMENTS_DIR = pathlib.Path("experiments")
-NOVELTY_REPORT = pathlib.Path("data/novelty_report.json")
-PLAN_PATH = pathlib.Path("data/plan.json")
-
+EXPERIMENTS_DIR = ROOT_DIR / "experiments"
 
 def _ensure_dirs() -> None:
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
@@ -53,32 +45,6 @@ def _timestamp() -> str:
 def _write_json(path: pathlib.Path, obj: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def _iter_persona_notes(context: Dict[str, Any]) -> List[str]:
-    """Return short persona notes for iterate guidance when enabled.
-
-    Controlled by pipeline.iterate.personas.enable or env ITERATE_PERSONAS=1.
-    """
-    try:
-        enable = get_bool("pipeline.iterate.personas.enable", False) or (
-            str(os.getenv("ITERATE_PERSONAS", "")).lower() in {"1", "true", "yes"}
-        )
-    except Exception:
-        enable = False
-    if not enable or DialogueManager is None:
-        return []
-    try:
-        dm = DialogueManager()
-        dm.post("User", "Provide 3 short bullets to guide hyperparameters and dataset choices.")
-        dm.post("User", f"Context: {json.dumps(context, ensure_ascii=False)}")
-        notes: List[str] = []
-        for role in ["PhD", "Professor", "SW", "ML"]:
-            r = dm.step_role(role, prompt="Be concrete and concise (<=3 bullets).")
-            notes.append(f"[{role}] {r.get('text','')}")
-        return notes
-    except Exception:
-        return []
 
 
 def propose_baseline_and_novelty(novelty: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
@@ -115,12 +81,18 @@ def propose_baseline_and_novelty(novelty: Dict[str, Any]) -> Tuple[Dict[str, Any
     )
     # Optionally include plan.json and persona notes (multi‑persona integration)
     plan_ctx = {}
-    try:
-        if PLAN_PATH.exists():
-            plan_ctx = json.loads(PLAN_PATH.read_text(encoding="utf-8"))
-    except Exception:
-        plan_ctx = {}
-    persona_notes = _iter_persona_notes({"novelty_report": novelty, "plan": plan_ctx, "stage": "propose"})
+    if active_plan_exists():
+        try:
+            plan_ctx = read_plan()
+        except Exception:
+            plan_ctx = {}
+    persona_notes = gather_notes(
+        "iterate_propose",
+        {"novelty_report": novelty, "plan": plan_ctx, "stage": "propose"},
+        steps=2,
+        config_key="pipeline.iterate.personas.enable",
+        env_name="ITERATE_PERSONAS",
+    )
 
     user_payload = {
         "novelty_report": novelty,
@@ -324,7 +296,13 @@ def engineer_refine_specs(
             "max_train_steps": "<=1000",
             "safe_changes": ["lr", "max_train_steps", "input_size", "novelty_component.enabled"],
         },
-        "persona_notes": _iter_persona_notes({"prior": compact, "stage": "refine"}),
+        "persona_notes": gather_notes(
+            "iterate_refine",
+            {"prior": compact, "stage": "refine"},
+            steps=2,
+            config_key="pipeline.iterate.personas.enable",
+            env_name="ITERATE_PERSONAS",
+        ),
         "output_schema": {
             "baseline": {},
             "novelty": {},
@@ -362,7 +340,13 @@ def engineer_refine_specs(
                 "baseline": b.get("title", "baseline"),
                 "novelty": n.get("title", "novelty"),
                 "ablation": a.get("title", "ablation"),
-                "persona_notes": _iter_persona_notes({"stage": "codegen", "novelty": n.get("novelty_component", {})}),
+                "persona_notes": gather_notes(
+                    "iterate_codegen",
+                    {"stage": "codegen", "novelty": n.get("novelty_component", {})},
+                    steps=1,
+                    config_key="pipeline.iterate.personas.enable",
+                    env_name="ITERATE_PERSONAS",
+                ),
             }, ensure_ascii=False)
             wrote = write_generated_aug_from_llm(n["novelty_component"]["description"], extra_context=ctx)
             if wrote is None:
@@ -721,7 +705,7 @@ def iterate(novelty: Dict[str, Any], max_iters: int = 2) -> None:
         pass
     # Automated analysis (deterministic + optional LLM)
     try:
-        write_analysis_files(RUNS_DIR, all_runs, decision, PLAN_PATH, novelty_spec if 'novelty_spec' in locals() else None)
+        write_analysis_files(RUNS_DIR, all_runs, decision, ACTIVE_PLAN_PATH, novelty_spec if 'novelty_spec' in locals() else None)
     except Exception:
         pass
     # Optional: draft paper immediately after iterate if requested

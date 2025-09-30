@@ -7,6 +7,22 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from lab.config import get_bool, get
+from agents.stage_manifest import (
+    ROOT,
+    DATA,
+    RUNS,
+    PDF_DIR,
+    SUM_DIR,
+    NOVELTY_REPORT,
+    stage_ready,
+)
+from lab.plan_store import (
+    PLAN_PATH as ACTIVE_PLAN_PATH,
+    list_plan_files,
+    set_active_plan_from_path,
+    active_plan_exists,
+)
+from agents.persona_support import gather_notes
 
 try:
     from agents.personas import DialogueManager  # type: ignore
@@ -14,22 +30,7 @@ except Exception:
     DialogueManager = None  # type: ignore
 
 
-
-HERE = Path(__file__).parent.parent.resolve()
-DATA = HERE / "data"
-RUNS = HERE / "runs"
-PDF_DIR = HERE / "pdfs"
-SUM_DIR = DATA / "summaries"
-NOVELTY_REPORT = DATA / "novelty_report.json"
-PLANS_DIR = DATA / "plans"
-PLAN_FILE = DATA / "plan.json"
-
-
-def _has_json_files(folder: Path) -> bool:
-    try:
-        return any(folder.glob("*.json"))
-    except Exception:
-        return False
+HERE = ROOT
 
 
 def _write_text(p: Path, s: str) -> None:
@@ -212,7 +213,13 @@ def main() -> None:
 
     # Phase: literature review / paper finding
     if not (get_bool("pipeline.skip.find_papers", False) or (str(os.getenv("SKIP_FIND_PAPERS", "")).lower() in {"1", "true", "yes"})):
-        notes = _persona_phase_notes("find_papers", {}, steps)
+        notes = gather_notes(
+            "find_papers",
+            {},
+            steps=steps,
+            config_key="pipeline.orchestrator.personas.enable",
+            env_name="ORCH_PERSONAS",
+        )
         if notes:
             log("find_papers_notes", notes)
             _write_text(notes_dir / "find_papers.txt", "\n\n".join(notes))
@@ -234,82 +241,78 @@ def main() -> None:
         except Exception:
             pass
     if not (_skip_cfg or _skip_env) or _force_summaries:
-        notes = _persona_phase_notes("summaries", {}, steps)
-        if notes:
-            log("summaries_notes", notes)
-            _write_text(notes_dir / "summaries.txt", "\n\n".join(notes))
-        # Programmatic call (no CLI), using stage config from YAML
-        try:
-            from agents.summarize import process_pdfs
-            # Prefetch embeddings model when enabled to reduce first-run latency/failures
-            _prefetch_embeddings_model()
-            # Count PDFs and detect missing summaries by filename
+        ready, reason = stage_ready("summaries")
+        if not ready:
+            print(f"[ORCH] {reason}")
+        else:
+            notes = gather_notes(
+                "summaries",
+                {},
+                steps=steps,
+                config_key="pipeline.orchestrator.personas.enable",
+                env_name="ORCH_PERSONAS",
+            )
+            if notes:
+                log("summaries_notes", notes)
+                _write_text(notes_dir / "summaries.txt", "\n\n".join(notes))
             try:
-                pdfs = sorted([p for p in PDF_DIR.glob("*.pdf") if p.is_file()]) if PDF_DIR.exists() else []
-                pdf_count = len(pdfs)
-                missing = []
-                for p in pdfs:
-                    out_path = (SUM_DIR / f"{p.stem}.json")
-                    if not out_path.exists():
-                        missing.append(p)
-                print(f"[ORCH] Summaries: found {pdf_count} PDFs; missing={len(missing)}")
-                summaries_up_to_date = (pdf_count > 0 and len(missing) == 0)
-            except Exception:
-                summaries_up_to_date = False
-            if pdf_count == 0:
-                print("[ORCH] Summaries skipped: no PDFs found under pdfs/.")
-                summaries_up_to_date = True  # avoid calling process_pdfs
-            # Prefer full-text mode for GPT-5 mini
-            profile = (get("pipeline.summarize.llm", None) or None)
-            model = (get("pipeline.summarize.model", None) or None)
-            default_model = (get("llm.default", None) or None)
-            prof = str(profile or "").strip().lower()
-            md = str(model or "").strip().lower()
-            dm = str(default_model or "").strip().lower()
-            chunk_size = int(get("pipeline.summarize.pass1_chunk", 20000) or 20000)
-            if (md.startswith("gpt-5-")) or (not md and prof == "default" and dm.startswith("gpt-5-")):
-                chunk_size = -1
-
-            skip_existing_cfg = get("pipeline.summarize.skip_existing", None)
-            skip_existing = True if skip_existing_cfg is None else bool(skip_existing_cfg)
-            # Per-stage streaming toggle
-            try:
-                from lab.config import get_bool as _get_bool
-                summ_stream = bool(_get_bool("pipeline.summarize.stream", get_bool("llm.stream", False)))
-            except Exception:
-                summ_stream = False
-            prev_stream = os.getenv("LLM_STREAM")
-            if summ_stream:
-                os.environ["LLM_STREAM"] = "1"
-            else:
-                os.environ.pop("LLM_STREAM", None)
-            try:
-                if not locals().get("summaries_up_to_date", False):
-                    t0 = time.time()
-                    process_pdfs(
-                pdf_dir=str(PDF_DIR),
-                out_dir=str(SUM_DIR),
-                max_pages=int(get("pipeline.summarize.max_pages", 0) or 0),
-                max_chars=int(get("pipeline.summarize.max_chars", 0) or 0),
-                chunk_size=chunk_size,
-                timeout=int(get("pipeline.summarize.timeout", 60) or 60),
-                max_tries=int(get("pipeline.summarize.max_tries", 4) or 4),
-                model=model,
-                profile=profile,
-                verbose=bool(get("pipeline.summarize.progress", True) or get("pipeline.summarize.detail", False)),
-                skip_existing=skip_existing,
-                    )
-                    stage_time["summaries"] = time.time() - t0
+                from agents.summarize import process_pdfs
+                _prefetch_embeddings_model()
+                try:
+                    pdfs = sorted([p for p in PDF_DIR.glob("*.pdf") if p.is_file()]) if PDF_DIR.exists() else []
+                    missing = [p for p in pdfs if not (SUM_DIR / f"{p.stem}.json").exists()]
+                    print(f"[ORCH] Summaries: found {len(pdfs)} PDFs; missing={len(missing)}")
+                    summaries_up_to_date = (len(pdfs) > 0 and len(missing) == 0)
+                except Exception:
+                    summaries_up_to_date = False
+                profile = (get("pipeline.summarize.llm", None) or None)
+                model = (get("pipeline.summarize.model", None) or None)
+                default_model = (get("llm.default", None) or None)
+                prof = str(profile or "").strip().lower()
+                md = str(model or "").strip().lower()
+                dm = str(default_model or "").strip().lower()
+                chunk_size = int(get("pipeline.summarize.pass1_chunk", 20000) or 20000)
+                if (md.startswith("gpt-5-")) or (not md and prof == "default" and dm.startswith("gpt-5-")):
+                    chunk_size = -1
+                # Always skip existing summaries; reprocessing handled only for missing PDFs.
+                skip_existing = True
+                try:
+                    from lab.config import get_bool as _get_bool
+                    summ_stream = bool(_get_bool("pipeline.summarize.stream", get_bool("llm.stream", False)))
+                except Exception:
+                    summ_stream = False
+                prev_stream = os.getenv("LLM_STREAM")
+                if summ_stream:
+                    os.environ["LLM_STREAM"] = "1"
                 else:
-                    print("[ORCH] Summaries step skipped: all PDFs already summarized.")
-            finally:
-                # restore env
-                if prev_stream is None:
                     os.environ.pop("LLM_STREAM", None)
-                else:
-                    os.environ["LLM_STREAM"] = prev_stream
-        except Exception as exc:
-            print(f"[ORCH] Summaries failed: {exc}")
+                try:
+                    if not summaries_up_to_date:
+                        t0 = time.time()
+                        process_pdfs(
+                            pdf_dir=str(PDF_DIR),
+                            out_dir=str(SUM_DIR),
+                            max_pages=int(get("pipeline.summarize.max_pages", 0) or 0),
+                            max_chars=int(get("pipeline.summarize.max_chars", 0) or 0),
+                            chunk_size=chunk_size,
+                            timeout=int(get("pipeline.summarize.timeout", 60) or 60),
+                            max_tries=int(get("pipeline.summarize.max_tries", 4) or 4),
+                            model=model,
+                            profile=profile,
+                            verbose=bool(get("pipeline.summarize.progress", True) or get("pipeline.summarize.detail", False)),
+                            skip_existing=skip_existing,
+                            selected=missing,
+                        )
+                        stage_time["summaries"] = time.time() - t0
+                    else:
+                        print("[ORCH] Summaries step skipped: all PDFs already summarized.")
+                finally:
+                    if prev_stream is None:
+                        os.environ.pop("LLM_STREAM", None)
+                    else:
+                        os.environ["LLM_STREAM"] = prev_stream
+            except Exception as exc:
+                print(f"[ORCH] Summaries failed: {exc}")
     # If vectors still do not exist but we have summaries, try summary-based backfill
     if emb_enable and ret_enable and (not _vectors_exist()):
         _prefetch_embeddings_model()
@@ -319,14 +322,20 @@ def main() -> None:
 
     # Phase: novelty
     if not (get_bool("pipeline.skip.novelty", False) or (str(os.getenv("SKIP_NOVELTY", "")).lower() in {"1", "true", "yes"})):
-        if not _has_json_files(SUM_DIR):
-            print("[ORCH] Skipping novelty: no summaries found in data/summaries.")
+        ready, reason = stage_ready("novelty")
+        if not ready:
+            print(f"[ORCH] {reason}")
         else:
-            notes = _persona_phase_notes("novelty", {}, steps)
+            notes = gather_notes(
+                "novelty",
+                {},
+                steps=steps,
+                config_key="pipeline.orchestrator.personas.enable",
+                env_name="ORCH_PERSONAS",
+            )
             if notes:
                 log("novelty_notes", notes)
                 _write_text(notes_dir / "novelty.txt", "\n\n".join(notes))
-            # Per-stage streaming for novelty
             try:
                 nov_stream = bool(get_bool("pipeline.novelty.stream", get_bool("llm.stream", False)))
             except Exception:
@@ -340,10 +349,17 @@ def main() -> None:
 
     # Phase: idea_blueprints (expand top ideas into runnable blueprints)
     if not (get_bool("pipeline.skip.idea_blueprints", False) or (str(os.getenv("SKIP_IDEA_BLUEPRINTS", "")).lower() in {"1", "true", "yes"})):
-        if not NOVELTY_REPORT.exists():
-            print("[ORCH] Skipping idea_blueprints: data/novelty_report.json not found.")
+        ready, reason = stage_ready("idea_blueprints")
+        if not ready:
+            print(f"[ORCH] {reason}")
         else:
-            notes = _persona_phase_notes("idea_blueprints", {}, steps)
+            notes = gather_notes(
+                "idea_blueprints",
+                {},
+                steps=steps,
+                config_key="pipeline.orchestrator.personas.enable",
+                env_name="ORCH_PERSONAS",
+            )
             if notes:
                 log("idea_blueprints_notes", notes)
                 _write_text(notes_dir / "idea_blueprints.txt", "\n\n".join(notes))
@@ -355,47 +371,46 @@ def main() -> None:
 
     # Phase: plan
     if not (get_bool("pipeline.skip.planner", False) or (str(os.getenv("SKIP_PLANNER", "")).lower() in {"1", "true", "yes"})):
-        if not NOVELTY_REPORT.exists():
-            print("[ORCH] Skipping planner: data/novelty_report.json not found.")
+        ready, reason = stage_ready("planner")
+        if not ready:
+            print(f"[ORCH] {reason}")
         else:
-            notes = _persona_phase_notes("plan", {}, steps)
+            notes = gather_notes(
+                "plan",
+                {},
+                steps=steps,
+                config_key="pipeline.orchestrator.personas.enable",
+                env_name="ORCH_PERSONAS",
+            )
             if notes:
                 log("plan_notes", notes)
                 _write_text(notes_dir / "plan.txt", "\n\n".join(notes))
             t0 = time.time()
             _run_mod("agents.planner")
             stage_time["planner"] = time.time() - t0
-            # Optional plan evaluation (feedback loop)
-        try:
-            from lab.config import get_bool as _gb  # local import for safety
-            if _gb("feedback.plan_eval.enable", _gb("feedback.enable", False)):
-                print("[ORCH] Evaluating plan(s)…")
-                try:
-                    from agents.plan_evaluator import evaluate_plans  # type: ignore
-                except Exception:
-                    evaluate_plans = None  # type: ignore
-                if evaluate_plans is not None:
-                    plans_dir = DATA / "plans"
-                    plan_files: List[Path] = []
-                    if plans_dir.exists():
+            try:
+                from lab.config import get_bool as _gb  # local import for safety
+                if _gb("feedback.plan_eval.enable", _gb("feedback.enable", False)):
+                    ready_eval, eval_reason = stage_ready("plan_eval")
+                    if not ready_eval:
+                        print(f"[ORCH] {eval_reason}")
+                    else:
+                        print("[ORCH] Evaluating plan(s)…")
                         try:
-                            plan_files = sorted(plans_dir.glob("plan_*.json"))
+                            from agents.plan_evaluator import evaluate_plans  # type: ignore
                         except Exception:
-                            plan_files = []
-                    # Fallback single plan
-                    if not plan_files:
-                        single = DATA / "plan.json"
-                        if single.exists():
-                            plan_files = [single]
-                    if plan_files:
-                        try:
-                            res = evaluate_plans(plan_files)
-                            (DATA / "plan_eval.json").write_text(json.dumps(res, ensure_ascii=False, indent=2), encoding="utf-8")
-                            print("[ORCH] Plan evaluation complete: plan_eval.json written")
-                        except Exception as _pexc:
-                            print(f"[ORCH] Plan evaluation failed: {_pexc}")
-        except Exception:
-            pass
+                            evaluate_plans = None  # type: ignore
+                        if evaluate_plans is not None:
+                            plan_files = list_plan_files(include_active=True)
+                            if plan_files:
+                                try:
+                                    res = evaluate_plans(plan_files)
+                                    (DATA / "plan_eval.json").write_text(json.dumps(res, ensure_ascii=False, indent=2), encoding="utf-8")
+                                    print("[ORCH] Plan evaluation complete: plan_eval.json written")
+                                except Exception as _pexc:
+                                    print(f"[ORCH] Plan evaluation failed: {_pexc}")
+            except Exception:
+                pass
     else:
         print("[ORCH] Skipping planner per config/env")
 
@@ -410,7 +425,7 @@ def main() -> None:
             objective = str(get("pipeline.codegen.structured.objective", "") or "")
             extra = None
             # Provide current plan.json if present
-            plan_path = DATA / "plan.json"
+            plan_path = ACTIVE_PLAN_PATH
             if plan_path.exists():
                 try:
                     plan_json = plan_path.read_text(encoding="utf-8")
@@ -434,7 +449,13 @@ def main() -> None:
                 pass
 
     # Phase: data prep (advice only; iterate consumes persona notes when enabled)
-    notes = _persona_phase_notes("data_prep", {}, steps)
+    notes = gather_notes(
+        "data_prep",
+        {},
+        steps=steps,
+        config_key="pipeline.orchestrator.personas.enable",
+        env_name="ORCH_PERSONAS",
+    )
     if notes:
         log("data_prep_notes", notes)
         _write_text(notes_dir / "data_prep.txt", "\n\n".join(notes))
@@ -442,7 +463,13 @@ def main() -> None:
     # Phase: interactive code loop (optional)
     enable_interactive = get_bool("pipeline.interactive.enable", False) or (str(os.getenv("INTERACTIVE_ENABLE", "")).lower() in {"1", "true", "yes"})
     if enable_interactive and not (get_bool("pipeline.skip.interactive", False) or (str(os.getenv("SKIP_INTERACTIVE", "")).lower() in {"1", "true", "yes"})):
-        notes = _persona_phase_notes("interactive", {}, steps)
+        notes = gather_notes(
+            "interactive",
+            {},
+            steps=steps,
+            config_key="pipeline.orchestrator.personas.enable",
+            env_name="ORCH_PERSONAS",
+        )
         if notes:
             log("interactive_notes", notes)
             _write_text(notes_dir / "interactive.txt", "\n\n".join(notes))
@@ -452,45 +479,50 @@ def main() -> None:
 
     # Phase: run (iterate) — supports per-blueprint multi-plan mode
     if not (get_bool("pipeline.skip.iterate", False) or (str(os.getenv("SKIP_ITERATE", "")).lower() in {"1", "true", "yes"})):
-        multi = get_bool("pipeline.planner.plan_each_blueprint", False) or (str(os.getenv("PLAN_EACH_BLUEPRINT", "")).lower() in {"1", "true", "yes"})
-        plan_files: List[Path] = []
-        if PLANS_DIR.exists():
-            try:
-                plan_files = sorted(PLANS_DIR.glob("plan_*.json"), key=lambda p: p.name)
-            except Exception:
-                plan_files = []
-        if multi:
-            if not plan_files and PLAN_FILE.exists():
-                plan_files = [PLAN_FILE]
-            if not plan_files:
-                print("[ORCH] Skipping iterate: multi-plan mode enabled but no plan artifacts found.")
-            else:
+        ready, reason = stage_ready("iterate")
+        if not ready:
+            print(f"[ORCH] {reason}")
+        else:
+            multi = get_bool("pipeline.planner.plan_each_blueprint", False) or (str(os.getenv("PLAN_EACH_BLUEPRINT", "")).lower() in {"1", "true", "yes"})
+            plan_files = list_plan_files(include_active=False)
+            if multi:
+                if not plan_files and active_plan_exists():
+                    plan_files = [ACTIVE_PLAN_PATH]
                 print(f"[ORCH] Multi-plan iterate enabled: {len(plan_files)} plans found")
                 for idx, pfile in enumerate(plan_files, start=1):
                     try:
-                        plan_json = pfile.read_text(encoding="utf-8")
-                        PLAN_FILE.write_text(plan_json, encoding="utf-8")
+                        set_active_plan_from_path(pfile)
                     except Exception as exc:
                         print(f"[ORCH] Failed to set active plan from {pfile}: {exc}")
                         continue
-                    notes = _persona_phase_notes("run_iterate", {"plan_file": str(pfile.name)}, steps)
-                    if notes:
-                        log("iterate_notes", notes)
-                        _write_text(notes_dir / f"iterate_{idx}.txt", "\n\n".join(notes))
+                    notes = gather_notes(
+                        "run_iterate",
+                        {"plan_file": str(pfile.name)},
+                        steps=steps,
+                        config_key="pipeline.orchestrator.personas.enable",
+                        env_name="ORCH_PERSONAS",
+                    )
+                if notes:
+                    log("iterate_notes", notes)
+                    _write_text(notes_dir / f"iterate_{idx}.txt", "\n\n".join(notes))
                     t0 = time.time()
                     env = {"LLM_STAGE": f"iterate_{idx}"}
                     _run_mod("agents.iterate", env_overrides=env)
                     stage_time[f"iterate_{idx}"] = time.time() - t0
-        elif PLAN_FILE.exists():
-            notes = _persona_phase_notes("run_iterate", {}, steps)
-            if notes:
-                log("iterate_notes", notes)
-                _write_text(notes_dir / "iterate.txt", "\n\n".join(notes))
-            t0 = time.time()
-            _run_mod("agents.iterate")
-            stage_time["iterate"] = time.time() - t0
-        else:
-            print("[ORCH] Skipping iterate: no plan artifacts found in data/plan.json or data/plans/.")
+            else:
+                notes = gather_notes(
+                    "run_iterate",
+                    {},
+                    steps=steps,
+                    config_key="pipeline.orchestrator.personas.enable",
+                    env_name="ORCH_PERSONAS",
+                )
+                if notes:
+                    log("iterate_notes", notes)
+                    _write_text(notes_dir / "iterate.txt", "\n\n".join(notes))
+                t0 = time.time()
+                _run_mod("agents.iterate")
+                stage_time["iterate"] = time.time() - t0
     else:
         print("[ORCH] Skipping iterate per config/env")
 
@@ -514,7 +546,13 @@ def main() -> None:
                 print(f"[ORCH] Analyzer failed: {_aexc}")
     except Exception:
         pass
-    notes = _persona_phase_notes("interpretation", {"summary": summary}, steps)
+    notes = gather_notes(
+        "interpretation",
+        {"summary": summary},
+        steps=steps,
+        config_key="pipeline.orchestrator.personas.enable",
+        env_name="ORCH_PERSONAS",
+    )
     if notes:
         log("interpret_notes", notes)
         _write_text(RUNS / "interpretation.txt", "\n\n".join(notes))
@@ -522,7 +560,13 @@ def main() -> None:
     # Phase: report (optional)
     write_paper = get_bool("pipeline.write_paper", False) or (str(os.getenv("WRITE_PAPER", "")).lower() in {"1", "true", "yes"})
     if write_paper:
-        notes = _persona_phase_notes("report", {}, steps)
+        notes = gather_notes(
+            "report",
+            {},
+            steps=steps,
+            config_key="pipeline.orchestrator.personas.enable",
+            env_name="ORCH_PERSONAS",
+        )
         if notes:
             log("report_notes", notes)
             _write_text(notes_dir / "report.txt", "\n\n".join(notes))

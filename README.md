@@ -203,7 +203,7 @@ pipeline:
 The pipeline generates several types of outputs:
 
 - **📄 Paper Summaries**: `data/summaries/*.json`
-- **🎯 Novelty Analysis**: `data/novelty_report.json`
+- **🎯 Novelty Analysis**: `data/novelty/novelty_report.json`
 - **📋 Experiment Plan**: `data/plan.json`
 - **📈 Experiment Results**: `runs/summary.json`, `runs/best.json`
 - **📊 Visualizations**: `runs/accuracy.png`, `runs/dashboard.html`

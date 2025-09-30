@@ -28,13 +28,13 @@ import json, math
 from pathlib import Path
 from typing import Any, Dict, List
 
+from lab.plan_store import list_plan_files, read_plan
+
 try:
     from lab.config import get_bool
 except Exception:
     def get_bool(key: str, default: bool=False) -> bool:  # type: ignore
         return bool(default)
-
-DATA_DIR = Path('data')
 
 WEIGHTS = {
     'feasibility': 0.30,
@@ -134,7 +134,7 @@ def evaluate_plans(paths: List[Path]) -> Dict[str, Any]:
     records = []
     for p in paths:
         try:
-            js = json.loads(p.read_text(encoding='utf-8'))
+            js = read_plan(p)
             scores = _score_plan(js)
             records.append({'path': str(p), 'scores': scores, 'composite': scores['composite']})
         except Exception as exc:
@@ -146,19 +146,12 @@ def evaluate_plans(paths: List[Path]) -> Dict[str, Any]:
 
 
 def main() -> None:
-    # Autodetect plans: data/plans/*.json else data/plan.json
-    multi_dir = DATA_DIR / 'plans'
-    plan_files: List[Path] = []
-    if multi_dir.exists():
-        plan_files.extend(sorted(multi_dir.glob('plan_*.json')))
-    single = DATA_DIR / 'plan.json'
-    if single.exists() and not plan_files:
-        plan_files.append(single)
+    plan_files = list_plan_files(include_active=True)
     if not plan_files:
         print('[PLAN_EVAL] No plan files found.')
         return
     res = evaluate_plans(plan_files)
-    out_path = DATA_DIR / 'plan_eval.json'
+    out_path = Path('data/plan_eval.json')
     try:
         out_path.write_text(json.dumps(res, ensure_ascii=False, indent=2), encoding='utf-8')
         print(f"[PLAN_EVAL] Wrote scores to {out_path}")

@@ -36,6 +36,7 @@ import datetime as _dt
 
 from lab.config import get
 from lab.logging_utils import vprint, is_verbose
+from lab.plan_store import PLAN_PATH
 from utils.llm_utils import chat_text_cached, LLMError
 from lab.codegen_schema import CodegenPlan, CodegenResult, AppliedFile, TestResult, FileArtifact
 from lab.sandbox import run_pytest
@@ -267,7 +268,7 @@ def run_structured_codegen(objective: str, extra_instructions: Optional[str] = N
     # Optionally derive objective/extra from plan.json when enabled
     use_plan = bool(get('pipeline.codegen.structured.use_plan_requirements', True))
     if use_plan:
-        plan_path = Path('data/plan.json')
+        plan_path = PLAN_PATH
         if plan_path.exists():
             try:
                 pj = json.loads(plan_path.read_text(encoding='utf-8'))

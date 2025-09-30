@@ -353,7 +353,11 @@ def chat_json(system: str, user: str, *, temperature: float = 0.0, model: Option
     # Optional streaming for live token output (best-effort)
     stream_enabled = get_bool("llm.stream", False) or (str(os.getenv("LLM_STREAM", "")).lower() in {"1", "true", "yes", "on"})
     if stream_enabled:
-        payload["stream"] = True
+        rf = payload.get("response_format", {})
+        if isinstance(rf, dict) and rf.get("type") == "json_object":
+            stream_enabled = False
+        else:
+            payload["stream"] = True
 
     # Build API body without non-spec keys
     payload_api = {k: v for k, v in payload.items() if k not in {"provider", "chat_url"}}

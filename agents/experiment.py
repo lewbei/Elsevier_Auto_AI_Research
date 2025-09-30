@@ -5,12 +5,11 @@ from typing import Any, Dict
 from utils.llm_utils import chat_json, LLMError
 from lab.experiment_runner import run_experiment
 from lab.config import dataset_path_for, get
+from agents.stage_manifest import ROOT as ROOT_DIR, RUNS as RUNS_DIR, NOVELTY_REPORT
 
 
 
-EXPERIMENTS_DIR = pathlib.Path("experiments")
-RUNS_DIR = pathlib.Path("runs")
-NOVELTY_REPORT = pathlib.Path("data/novelty_report.json")
+EXPERIMENTS_DIR = ROOT_DIR / "experiments"
 
 
 def _ensure_dirs() -> None:

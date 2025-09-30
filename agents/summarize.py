@@ -6,12 +6,25 @@ from pathlib import Path
 from utils.pdf_utils import extract_text_from_pdf
 from utils.llm_utils import chat_json, LLMError
 from lab.config import get as _cfg_get
+from lab.summary_cache import load_cached_text, save_cached_text, write_quality_report
 
 
 def _truncate(s: str, n: int) -> str:
     if len(s) <= n:
         return s
     return s[: n - 3] + "..."
+
+
+def _is_nonempty(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, tuple, set)):
+        return any(_is_nonempty(v) for v in value)
+    if isinstance(value, dict):
+        return any(_is_nonempty(v) for v in value.values())
+    return bool(value)
 
 
 # ---- Deterministic metadata extraction helpers ----
@@ -803,6 +816,7 @@ def process_pdfs(
     profile: Optional[str] = None,
     verbose: bool = True,
     skip_existing: bool = True,
+    selected: Optional[List[Path]] = None,
 ) -> int:
     """Process all PDFs in pdf_dir and write summary JSONs into out_dir.
 
@@ -811,30 +825,105 @@ def process_pdfs(
     pdf_dir_p = Path(pdf_dir)
     out_dir_p = Path(out_dir)
     out_dir_p.mkdir(parents=True, exist_ok=True)
+
+    def _quality_entry(
+        *,
+        pdf_name: str,
+        status: str,
+        cached_text: bool,
+        text_chars: Optional[int] = None,
+        summary: Optional[Dict[str, Any]] = None,
+        critic: Optional[Dict[str, Any]] = None,
+        error: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        summary_obj = summary if isinstance(summary, dict) else {}
+        critic_obj = critic if isinstance(critic, dict) else {}
+        fields_filled = sum(1 for v in summary_obj.values() if _is_nonempty(v))
+        total_fields = len(summary_obj)
+        return {
+            "pdf": pdf_name,
+            "status": status,
+            "cached_text": cached_text,
+            "text_chars": text_chars,
+            "summary_fields_filled": fields_filled,
+            "summary_fields_missing": max(total_fields - fields_filled, 0),
+            "summary_confidence": summary_obj.get("confidence", ""),
+            "critic_points": len(critic_obj.get("weaknesses", [])),
+            "critic_followups": len(critic_obj.get("followup_experiments", [])),
+            "error": error,
+        }
+
     if not pdf_dir_p.exists():
         if verbose:
             print(f"[SUM] PDF dir not found: {pdf_dir_p}")
         return 0
     pdfs = sorted([p for p in pdf_dir_p.glob("*.pdf") if p.is_file()])
+    if selected:
+        selected_names = {Path(s).name for s in selected}
+        pdfs = [p for p in pdfs if p.name in selected_names]
     if not pdfs:
         if verbose:
             print("[SUM] No PDFs found to process.")
         return 0
     written = 0
+    quality_records: List[Dict[str, Any]] = []
+    quality_path = out_dir_p / "_summary_quality.json"
     for i, pdf in enumerate(pdfs, start=1):
         out_path = out_dir_p / f"{pdf.stem}.json"
         if skip_existing and out_path.exists():
             if verbose:
                 print(f"[SUM] Skip existing: {out_path.name}")
+            cached_summary = None
+            cached_critic = None
+            try:
+                existing_payload = json.loads(out_path.read_text(encoding="utf-8"))
+                if isinstance(existing_payload, dict):
+                    cached_summary = existing_payload.get("summary")
+                    cached_critic = existing_payload.get("critic")
+            except Exception as exc:
+                quality_records.append(
+                    _quality_entry(
+                        pdf_name=pdf.name,
+                        status="skip_existing_read_failed",
+                        cached_text=False,
+                        error=str(exc)[:200],
+                    )
+                )
+                continue
+            quality_records.append(
+                _quality_entry(
+                    pdf_name=pdf.name,
+                    status="skip_existing",
+                    cached_text=load_cached_text(pdf.name) is not None,
+                    summary=cached_summary if isinstance(cached_summary, dict) else None,
+                    critic=cached_critic if isinstance(cached_critic, dict) else None,
+                )
+            )
             continue
         if verbose:
             print(f"[SUM] ({i}/{len(pdfs)}) Extracting: {pdf.name}")
-        try:
-            text = extract_text_from_pdf(str(pdf), max_pages=max_pages, max_chars=max_chars)
-        except Exception as exc:
+        cached_text = load_cached_text(pdf.name)
+        if cached_text is not None:
+            text = cached_text
             if verbose:
-                print(f"[SUM]  • extract failed: {pdf.name} :: {exc}")
-            continue
+                print(f"[SUM]  • using cached text ({pdf.name})")
+        else:
+            try:
+                text = extract_text_from_pdf(str(pdf), max_pages=max_pages, max_chars=max_chars)
+                save_cached_text(pdf.name, text)
+            except Exception as exc:
+                if verbose:
+                    print(f"[SUM]  • extract failed: {pdf.name} :: {exc}")
+                quality_records.append(
+                    _quality_entry(
+                        pdf_name=pdf.name,
+                        status="extract_failed",
+                        cached_text=False,
+                        error=str(exc)[:200],
+                    )
+                )
+                continue
+        text_chars = len(text)
         try:
             summ = summarize_paper(
                 text,
@@ -849,6 +938,15 @@ def process_pdfs(
         except LLMError as exc:
             if verbose:
                 print(f"[SUM]  • summarize failed: {pdf.name} :: {exc}")
+            quality_records.append(
+                _quality_entry(
+                    pdf_name=pdf.name,
+                    status="summarize_failed",
+                    cached_text=cached_text is not None,
+                    text_chars=text_chars,
+                    error=str(exc)[:200],
+                )
+            )
             continue
         try:
             crit = criticize_paper(summ, timeout=timeout, max_tries=max_tries, model=model, profile=profile)
@@ -881,10 +979,39 @@ def process_pdfs(
             if verbose:
                 print(f"[SUM]  • wrote {out_path}")
             written += 1
+            quality_records.append(
+                _quality_entry(
+                    pdf_name=pdf.name,
+                    status="success",
+                    cached_text=cached_text is not None,
+                    text_chars=text_chars,
+                    summary=summ,
+                    critic=crit,
+                )
+            )
         except Exception as exc:
             if verbose:
                 print(f"[SUM]  • write failed: {out_path.name} :: {exc}")
+            quality_records.append(
+                _quality_entry(
+                    pdf_name=pdf.name,
+                    status="write_failed",
+                    cached_text=cached_text is not None,
+                    text_chars=text_chars,
+                    summary=summ,
+                    critic=crit,
+                    error=str(exc)[:200],
+                )
+            )
             continue
     if verbose:
         print(f"[SUM] Done. New summaries: {written}")
+    if quality_records:
+        try:
+            write_quality_report(quality_path, quality_records)
+            if verbose:
+                print(f"[SUM] Quality report updated: {quality_path}")
+        except Exception as exc:
+            if verbose:
+                print(f"[SUM]  • quality report write failed: {exc}")
     return written

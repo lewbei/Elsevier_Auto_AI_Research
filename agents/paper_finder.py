@@ -7,6 +7,7 @@ import requests
 from typing import Optional, Tuple, List
 from lab.config import get as cfg_get
 from utils.llm_utils import chat_json, LLMError
+from agents.query_builder import build_keywords
 
 # ---------------------------
 # ENV / CONSTANTS
@@ -241,100 +242,6 @@ def judge_relevance_llm(title: str, abstract: str, query: str) -> Tuple[bool, st
         return False, f"LLM error: {exc}"
 
 
-# ---------------------------
-# Keyword-based query synthesis (deterministic)
-# ---------------------------
-_STOPWORDS = {
-    "and","or","the","a","an","of","to","for","in","on","with","using","use","via","from",
-    "by","into","at","as","is","are","be","being","been","this","that","these","those","we","i",
-}
-
-def _domain_keywords_from_goal(goal: str) -> List[str]:
-    g = (goal or "").lower()
-    kws: List[str] = []
-    if any(x in g for x in ["human pose", "pose classification", "skeleton"]):
-        kws += [
-            "human pose classification",
-            "skeleton-based",
-            "pose estimation",
-            "keypoint detection",
-            "few-shot learning",
-            "one-shot learning",
-            "low-shot",
-            "meta-learning",
-            "prototypical networks",
-            "relation networks",
-            "metric learning",
-            "graph neural network",
-            "GNN",
-            "ST-GCN",
-            "transformer",
-            "action recognition",
-            "NTU RGB+D",
-            "Human3.6M",
-            "MPII",
-            "COCO",
-        ]
-    return kws
-
-def _generate_llm_keywords(goal: str, *, count: int, max_len: int, model: str | None = None, profile: str | None = None) -> List[str]:
-    """Ask the active LLM for focused search keywords based on the project goal."""
-    if not goal:
-        return []
-    try:
-        payload = {
-            "goal": goal,
-            "count": max(1, count),
-            "max_len": max(8, max_len),
-            "format": "json",
-        }
-        system = (
-            "You generate concise search keywords for academic literature retrieval.\n"
-            "Return strictly JSON of the form {\"keywords\": [\"term\", ...]} with unique items.\n"
-            "Each keyword must stay under max_len characters, avoid stopwords alone, and remain specific to the goal."
-        )
-        js = chat_json(system, json.dumps(payload, ensure_ascii=False), temperature=0.0, model=model, profile=profile)
-    except LLMError:
-        return []
-    out: List[str] = []
-    for item in (js.get("keywords") or []):
-        term = str(item).strip()
-        if not term:
-            continue
-        out.append(term[:max_len])
-        if len(out) >= count:
-            break
-    return out
-
-
-def _normalize_keywords(goal: str, include_terms: List[str], synonyms: List[str], cfg_keywords: List[str], llm_keywords: List[str]) -> List[str]:
-    """Build a unique, ordered keyword list from config + domain mapping; avoid low-signal tokens."""
-    seen = set()
-    out: List[str] = []
-    def add(s: str):
-        s = str(s).strip()
-        if not s:
-            return
-        if s.lower() in _STOPWORDS:
-            return
-        if s in seen:
-            return
-        seen.add(s); out.append(s)
-    # 1) explicit keywords from config (if any)
-    for s in (cfg_keywords or []):
-        add(s)
-    # 2) LLM-proposed keywords (preferred path when config is empty)
-    for s in (llm_keywords or []):
-        add(s)
-    # 3) domain-mapped keywords from goal
-    for s in _domain_keywords_from_goal(goal):
-        add(s)
-    # 4) include_terms and synonyms
-    for s in (include_terms or []) + (synonyms or []):
-        add(s)
-    # Do NOT add single tokens from goal to avoid noise like "want"
-    return out
-
 def _chunked_keyword_queries(keywords: List[str], fields: List[str], terms_per_query: int, max_queries: int) -> List[str]:
     """Create one fielded query per keyword: (ti:"k" OR abs:"k"). Always 1 keyword/query."""
     out: List[str] = []
@@ -415,17 +322,30 @@ if __name__ == "__main__":
         kw_llm_count, kw_llm_maxlen = 8, 60
         kw_llm_profile = kw_llm_model = None
     queries: List[str] = []
-    # Build keywords first
+    keyword_source: Dict[str, Any] = {}
     kw_llm: List[str] = []
-    if kw_enable and not kw_list:
-        kw_llm = _generate_llm_keywords(
+    kws: List[str] = []
+    if kw_enable:
+        kws, kw_llm = build_keywords(
             project_goal,
-            count=kw_llm_count,
-            max_len=kw_llm_maxlen,
-            model=kw_llm_model,
-            profile=kw_llm_profile,
+            include_terms,
+            synonyms,
+            kw_list,
+            llm_count=max(1, kw_llm_count),
+            llm_max_len=kw_llm_maxlen,
+            llm_model=kw_llm_model,
+            llm_profile=kw_llm_profile,
+            allow_fallback=False,
+            require_llm=True,
         )
-    kws = _normalize_keywords(project_goal, include_terms, synonyms, kw_list, kw_llm) if kw_enable else []
+        if not kws:
+            raise SystemExit("LLM keyword generation failed; ensure LLM credentials are set and reachable.")
+        keyword_source = {
+            "llm_keywords": kw_llm,
+            "config_keywords": kw_list,
+            "include_terms": include_terms,
+            "synonyms": synonyms,
+        }
     try:
         simple_kw = bool(cfg_get("pipeline.find_papers.keyword_query.simple", True)) if kw_enable else False
     except Exception:
@@ -465,18 +385,14 @@ if __name__ == "__main__":
         queries = [project_goal or "deep learning"]
     # Show which keywords are used to build the search query
     try:
-        print("[QUERY] source:")
-        print(f"[QUERY]   base_query = {base_query!r}")
-        print(f"[QUERY]   project_goal = {project_goal!r}")
-        print(f"[QUERY]   include_terms = {include_terms}")
-        print(f"[QUERY]   synonyms = {synonyms}")
-    except Exception:
-        pass
-    # Log keywords if keyword_query enabled
-    try:
-        if kw_enable:
-            kws_dbg = _normalize_keywords(project_goal, include_terms, synonyms, kw_list, kw_llm)
-            print(f"[KEYWORDS] {kws_dbg}")
+        print("[KEYWORD SOURCE]")
+        print(f"  project_goal = {project_goal!r}")
+        print(f"  base_query = {base_query!r}")
+        print(f"  include_terms = {include_terms}")
+        print(f"  synonyms = {synonyms}")
+        if keyword_source:
+            print(f"  llm_keywords = {keyword_source.get('llm_keywords')}")
+            print(f"  config_keywords = {keyword_source.get('config_keywords')}")
     except Exception:
         pass
     for i, q in enumerate(queries, start=1):
@@ -697,8 +613,15 @@ if __name__ == "__main__":
             per_query = 10
         page_sz = max(1, per_query)
         try:
-            allow_cats = [str(x).strip() for x in (cfg_get("pipeline.find_papers.arxiv.categories", ["cs.CV"]) or ["cs.CV"]) if str(x).strip()]
+            raw_cats = cfg_get("pipeline.find_papers.arxiv.categories", None)
         except Exception:
+            raw_cats = None
+        allow_cats: List[str] = []
+        if isinstance(raw_cats, list):
+            allow_cats = [str(x).strip() for x in raw_cats if str(x).strip()]
+        elif isinstance(raw_cats, str) and raw_cats.strip():
+            allow_cats = [raw_cats.strip()]
+        if raw_cats is None and not allow_cats:
             allow_cats = ["cs.CV"]
         try:
             simple_kw = bool(cfg_get("pipeline.find_papers.keyword_query.simple", True))
@@ -781,15 +704,18 @@ if __name__ == "__main__":
                     out_dir.mkdir(parents=True, exist_ok=True)
                     safe = _sanitize_filename(title) or title[:50]
                     dest = out_dir / f"{safe}.pdf"
-                    rr = requests.get(pdf, stream=True, timeout=90, headers={"User-Agent": USER_AGENT})
-                    if rr.status_code == 200 and rr.headers.get("content-type", "").lower().startswith("application/pdf"):
-                        with open(dest, "wb") as f:
-                            for chunk in rr.iter_content(chunk_size=1 << 15):
-                                if chunk:
-                                    f.write(chunk)
+                    if dest.exists():
                         pdf_path = str(dest)
-                        downloaded += 1
-                        print(f"[ARXIV DOWNLOADED] {dest}")
+                    else:
+                        rr = requests.get(pdf, stream=True, timeout=90, headers={"User-Agent": USER_AGENT})
+                        if rr.status_code == 200 and rr.headers.get("content-type", "").lower().startswith("application/pdf"):
+                            with open(dest, "wb") as f:
+                                for chunk in rr.iter_content(chunk_size=1 << 15):
+                                    if chunk:
+                                        f.write(chunk)
+                            pdf_path = str(dest)
+                            downloaded += 1
+                            print(f"[ARXIV DOWNLOADED] {dest}")
                 except Exception as exc:
                     print(f"[ARXIV DL FAIL] {title[:80]!r} :: {exc}")
 
@@ -820,14 +746,40 @@ if __name__ == "__main__":
         chosen = "elsevier" if _elsevier_is_available(queries[0]) else "arxiv"
     print(f"[PROVIDER] using: {chosen} (preference={prov_pref})")
 
+    query_stats = []
     for idx, q in enumerate(queries, start=1):
         print(f"[RUN QUERY {idx}/{len(queries)}]")
         if chosen == "elsevier":
+            before_kept = kept
+            before_download = downloaded
             _run_elsevier(q)
+            query_stats.append({
+                "query": q,
+                "provider": "elsevier",
+                "kept_delta": kept - before_kept,
+                "download_delta": downloaded - before_download,
+            })
         else:
+            before_kept = kept
+            before_download = downloaded
             _run_arxiv(q)
+            query_stats.append({
+                "query": q,
+                "provider": "arxiv",
+                "kept_delta": kept - before_kept,
+                "download_delta": downloaded - before_download,
+            })
         if prev_kept + kept >= MAX_KEPT:
             break
+
+    try:
+        print("[QUERY SUMMARY]")
+        for stat in query_stats:
+            print(
+                f"  {stat['provider']:7s} | kept +{stat['kept_delta']:2d} | downloaded +{stat['download_delta']:2d} :: {stat['query']}"
+            )
+    except Exception:
+        pass
 
     print(
         "\n[DONE] "

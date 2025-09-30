@@ -6,12 +6,7 @@ from typing import Any, Dict
 
 from lab.logging_utils import append_jsonl
 from agents.iterate import iterate
-
-
-
-RUNS_DIR = Path("runs")
-DATA_DIR = Path("data")
-
+from agents.stage_manifest import RUNS as RUNS_DIR, DATA as DATA_DIR, NOVELTY_REPORT, stage_ready
 
 def _read_json(p: Path) -> Dict[str, Any]:
     try:
@@ -26,10 +21,10 @@ def _summary_goal() -> bool:
 
 
 def _load_novelty() -> Dict[str, Any]:
-    p = DATA_DIR / "novelty_report.json"
-    if not p.exists():
-        raise SystemExit("Missing data/novelty_report.json. Run agents.novelty first.")
-    return _read_json(p)
+    ready, reason = stage_ready("planner")
+    if not ready:
+        raise SystemExit(reason)
+    return _read_json(NOVELTY_REPORT)
 
 
 def run_stage(name: str, novelty: Dict[str, Any], max_iters: int, env_overrides: Dict[str, str] | None = None) -> None:

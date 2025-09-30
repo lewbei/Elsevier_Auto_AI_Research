@@ -1,14 +1,19 @@
 from __future__ import annotations
-"""Lightweight YAML/JSON config loader with dotted-key access.
+"""Configuration loader for the pipeline and lab utilities.
 
-Config precedence (highest → lowest):
-- YAML/JSON config file (CONFIG_FILE env or ./config.yaml|.yml|.json)
-- Environment variables (for a few compatibility keys)
-- Hardcoded defaults (only when both above are missing)
+Responsibilities:
+- Load `.env` once per process (only populate missing keys).
+- Resolve the project configuration file (`config.yaml`/`config.yml`/`config.json`).
+- Provide dotted-key access via `get`, `get_bool`, etc.
 
-This keeps existing env-based behavior but allows a single project-level
-YAML to override settings across agents. Parsing dependency (PyYAML) is
-optional: if missing, JSON is supported; otherwise returns empty config.
+Public API:
+- `get(key, default)`
+- `get_bool(key, default=False)`
+- `get_int`, `get_float`
+- dataset helpers (`dataset_name`, `dataset_path_for`, `dataset_kind`, `dataset_splits`).
+
+This module is the single source of truth for configuration across agents and
+lab modules; do not read `.env` or `config.yaml` elsewhere.
 """
 
 from pathlib import Path
@@ -17,6 +22,29 @@ import os
 import json
 
 _CACHE: Optional[Dict[str, Any]] = None
+_ENV_LOADED = False
+
+
+def _load_env_file(path: Optional[Path] = None) -> None:
+    """Populate os.environ with keys from a .env file without overriding existing values."""
+    env_path = path or (Path.cwd() / ".env")
+    if not env_path.exists():
+        return
+    try:
+        for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            if not key or key in os.environ:
+                continue
+            val = value.strip().strip("\"'")
+            os.environ[key] = val
+    except Exception:
+        return
 
 
 def _find_config_file() -> Optional[Path]:
@@ -66,6 +94,10 @@ def _load_config() -> Dict[str, Any]:
 
 def get_config(refresh: bool = False) -> Dict[str, Any]:
     global _CACHE
+    global _ENV_LOADED
+    if not _ENV_LOADED:
+        _load_env_file()
+        _ENV_LOADED = True
     if refresh or _CACHE is None:
         _CACHE = _load_config()
     return _CACHE

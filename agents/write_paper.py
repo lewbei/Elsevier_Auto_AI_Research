@@ -15,12 +15,17 @@ from typing import Any, Dict, List, Optional
 
 from lab.config import get, get_bool
 from utils.llm_utils import chat_text_cached, LLMError
+from agents.stage_manifest import (
+    DATA as DATA_DIR,
+    RUNS as RUNS_DIR,
+    ROOT as ROOT_DIR,
+    NOVELTY_REPORT,
+    PLAN_FILE,
+)
 
 
 
-DATA_DIR = pathlib.Path("data")
-RUNS_DIR = pathlib.Path("runs")
-PAPER_DIR = pathlib.Path("paper")
+PAPER_DIR = ROOT_DIR / "paper"
 
 
 def _ensure_dirs() -> None:
@@ -858,8 +863,8 @@ def try_pdflatex(tex_path: pathlib.Path) -> None:
 
 def main() -> None:
     _ensure_dirs()
-    novelty = _read_json(DATA_DIR / "novelty_report.json")
-    plan = _read_json(DATA_DIR / "plan.json")
+    novelty = _read_json(NOVELTY_REPORT)
+    plan = _read_json(PLAN_FILE)
     summary = _read_json(RUNS_DIR / "summary.json")
     # Robustness: guard against files that contain valid JSON but not an object (e.g., a string)
     if not isinstance(novelty, dict):
