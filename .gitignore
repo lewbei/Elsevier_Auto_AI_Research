@@ -25,7 +25,7 @@ example
 build/
 dist/
 *.egg-info/
-
+AGENTS.md
 # Data and cache
 logs/
 mlruns/
